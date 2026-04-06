@@ -4,11 +4,14 @@ import path from 'path';
 import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
-  const env = loadEnv(mode, '.', '');
+  const fileEnv = loadEnv(mode, '.', '');
+  // Vercel / CI: secrets are on process.env only; loadEnv() only reads .env files.
+  const geminiKey = fileEnv.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '';
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      // JSON.stringify so the define is never raw `undefined` (breaks the client bundle).
+      'process.env.GEMINI_API_KEY': JSON.stringify(geminiKey),
     },
     resolve: {
       alias: {

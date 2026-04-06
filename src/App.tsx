@@ -7,8 +7,27 @@ import { parseKnowledgeCsv, type KnowledgeRow } from "./parseKnowledgeCsv";
 
 const BULK_INGEST_CHUNK = 12;
 
-// Initialize Gemini in the frontend
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
+/** Browser SDK throws if apiKey is null/undefined; avoid that so the UI can still mount. */
+let geminiSingleton: GoogleGenAI | null | undefined;
+function getGeminiClient(): GoogleGenAI | null {
+  if (geminiSingleton !== undefined) return geminiSingleton;
+  const key =
+    typeof process.env.GEMINI_API_KEY === "string" ? process.env.GEMINI_API_KEY.trim() : "";
+  if (!key) {
+    geminiSingleton = null;
+    return null;
+  }
+  geminiSingleton = new GoogleGenAI({ apiKey: key });
+  return geminiSingleton;
+}
+
+function geminiMissingMessage() {
+  return (
+    "GEMINI_API_KEY set nahi hai.\n\n" +
+    "Vercel: Project → Settings → Environment Variables → GEMINI_API_KEY add karein, " +
+    "Production + Preview dono par lagayein, phir Redeploy."
+  );
+}
 
 interface Message {
   id: string;
@@ -17,6 +36,10 @@ interface Message {
 }
 
 export default function App() {
+  const hasGeminiKey =
+    typeof process.env.GEMINI_API_KEY === "string" &&
+    process.env.GEMINI_API_KEY.trim().length > 0;
+
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -162,6 +185,12 @@ export default function App() {
     );
     if (!ok) return;
 
+    const gemini = getGeminiClient();
+    if (!gemini) {
+      alert(geminiMissingMessage());
+      return;
+    }
+
     setIsBulkImporting(true);
     setBulkProgress("");
 
@@ -172,7 +201,7 @@ export default function App() {
         setBulkProgress(`Embedding ${i + 1} / ${rows.length}: ${topic.slice(0, 48)}…`);
         addDebug(`Bulk embed ${i + 1}/${rows.length}`);
         const textForEmbedding = `Topic: ${topic}\n\n${content}`;
-        const embeddingResult = await ai.models.embedContent({
+        const embeddingResult = await gemini.models.embedContent({
           model: "gemini-embedding-2-preview",
           contents: [textForEmbedding],
         });
@@ -201,6 +230,13 @@ export default function App() {
 
   const handleIngestCustom = async () => {
     if (!customKnowledge.trim() || isIngesting || isBulkImporting) return;
+
+    const gemini = getGeminiClient();
+    if (!gemini) {
+      alert(geminiMissingMessage());
+      return;
+    }
+
     setIsIngesting(true);
 
     const topic = knowledgeTopic.trim();
@@ -209,7 +245,7 @@ export default function App() {
 
     try {
       addDebug("Generating embedding...");
-      const embeddingResult = await ai.models.embedContent({
+      const embeddingResult = await gemini.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: [textForEmbedding],
       });
@@ -260,8 +296,22 @@ export default function App() {
     setIsLoading(true);
 
     try {
+      const gemini = getGeminiClient();
+      if (!gemini) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: "bot",
+            content:
+              "**GEMINI_API_KEY** live site par set nahi hai. Vercel → Environment Variables → add karein aur redeploy karein.",
+          },
+        ]);
+        return;
+      }
+
       // 1. Generate embedding for the query in the frontend
-      const embeddingResult = await ai.models.embedContent({
+      const embeddingResult = await gemini.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: [currentInput],
       });
@@ -307,7 +357,7 @@ export default function App() {
         Format the response in Markdown with clear headings.
       `;
 
-      const response = await ai.models.generateContent({
+      const response = await gemini.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: prompt,
       });
@@ -361,10 +411,16 @@ export default function App() {
     ];
 
     try {
+      const gemini = getGeminiClient();
+      if (!gemini) {
+        alert(geminiMissingMessage());
+        return;
+      }
+
       const dataWithEmbeddings = [];
       for (const item of sampleData) {
         const textForEmbedding = `Topic: ${item.topic}\n\n${item.content}`;
-        const embeddingResult = await ai.models.embedContent({
+        const embeddingResult = await gemini.models.embedContent({
           model: "gemini-embedding-2-preview",
           contents: [textForEmbedding],
         });
@@ -396,6 +452,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 font-sans flex flex-col">
+      {!hasGeminiKey ? (
+        <div className="bg-amber-100 border-b border-amber-300 px-4 py-3 text-center text-sm text-amber-950">
+          <strong>GEMINI_API_KEY missing.</strong> Vercel → Project → Settings → Environment Variables → add{" "}
+          <code className="bg-white/70 px-1 rounded">GEMINI_API_KEY</code> for Production (and Preview), then{" "}
+          <strong>Redeploy</strong>. Until then chat / embeddings kaam nahi karenge.
+        </div>
+      ) : null}
       {/* Header */}
       <header className="bg-white border-b border-stone-200 py-4 px-6 sticky top-0 z-10 shadow-sm">
         <div className="max-w-4xl mx-auto flex justify-between items-center">
