@@ -7,6 +7,18 @@ import { parseKnowledgeCsv, type KnowledgeRow } from "./parseKnowledgeCsv";
 
 const BULK_INGEST_CHUNK = 12;
 
+/** Same origin on Vercel; set only if API is hosted on another domain. */
+const API_BASE_RAW = import.meta.env.VITE_API_BASE_URL;
+const API_BASE =
+  typeof API_BASE_RAW === "string" && API_BASE_RAW.length > 0
+    ? API_BASE_RAW.replace(/\/$/, "")
+    : "";
+
+function apiUrl(path: string): string {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return API_BASE ? `${API_BASE}${p}` : p;
+}
+
 /** Browser SDK throws if apiKey is null/undefined; avoid that so the UI can still mount. */
 let geminiSingleton: GoogleGenAI | null | undefined;
 function getGeminiClient(): GoogleGenAI | null {
@@ -76,7 +88,7 @@ export default function App() {
     setIsLoadingKnowledge(true);
     try {
       addDebug("Fetching knowledge list...");
-      const res = await fetch("/api/list-knowledge");
+      const res = await fetch(apiUrl("/api/list-knowledge"));
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Fetch failed");
       setSavedKnowledge(data.items || []);
@@ -92,7 +104,7 @@ export default function App() {
   const checkDbStatus = async () => {
     try {
       addDebug("Checking DB status...");
-      const res = await fetch("/api/db-status");
+      const res = await fetch(apiUrl("/api/db-status"));
       const data = await res.json();
       if (data.status === "connected") {
         setDbStatus("connected");
@@ -115,7 +127,7 @@ export default function App() {
     setIsInitializing(true);
     addDebug("Starting DB initialization...");
     try {
-      const res = await fetch("/api/init-db", { method: "POST" });
+      const res = await fetch(apiUrl("/api/init-db"), { method: "POST" });
       const data = await res.json();
       if (res.ok) {
         alert("Database initialized successfully!");
@@ -154,7 +166,7 @@ export default function App() {
       const end = Math.min(i + chunk.length, withEmb.length);
       setBulkProgress(`Saving ${i + 1}–${end} / ${totalLabel}…`);
       addDebug(`Ingest batch ${i / BULK_INGEST_CHUNK + 1}`);
-      const response = await fetch("/api/ingest", {
+      const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: chunk }),
@@ -253,7 +265,7 @@ export default function App() {
       addDebug(`Embedding generated (Size: ${embedding.length})`);
 
       addDebug("Sending to backend...");
-      const response = await fetch("/api/ingest", {
+      const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -318,7 +330,7 @@ export default function App() {
       const queryEmbedding = embeddingResult.embeddings[0].values;
 
       // 2. Call backend to search for context
-      const searchResponse = await fetch("/api/search", {
+      const searchResponse = await fetch(apiUrl("/api/search"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ embedding: queryEmbedding }),
@@ -431,7 +443,7 @@ export default function App() {
         });
       }
 
-      const response = await fetch("/api/ingest", {
+      const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: dataWithEmbeddings }),
