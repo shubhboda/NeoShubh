@@ -74,7 +74,9 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.post("/api/init-db", async (req, res) => {
+  const router = express.Router();
+
+  router.post("/init-db", async (req, res) => {
     try {
       const c = await getPool().connect();
       await c.query("CREATE EXTENSION IF NOT EXISTS vector;");
@@ -94,7 +96,7 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.get("/api/list-knowledge", async (req, res) => {
+  router.get("/list-knowledge", async (req, res) => {
     try {
       const client = await getPool().connect();
       const result = await client.query(
@@ -107,7 +109,7 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.get("/api/db-status", async (req, res) => {
+  router.get("/db-status", async (req, res) => {
     try {
       const client = await getPool().connect();
       const extCheck = await client.query("SELECT * FROM pg_extension WHERE extname = 'vector';");
@@ -131,7 +133,7 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.post("/api/search", async (req, res) => {
+  router.post("/search", async (req, res) => {
     const { embedding } = req.body;
 
     if (!embedding || !Array.isArray(embedding)) {
@@ -167,7 +169,7 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.post("/api/ingest", async (req, res) => {
+  router.post("/ingest", async (req, res) => {
     const { data } = req.body;
 
     if (!data || !Array.isArray(data)) {
@@ -199,6 +201,10 @@ export function createApiApp(): express.Express {
       res.status(500).json({ error: error instanceof Error ? error.message : "Ingestion failed" });
     }
   });
+
+  // /api/... for local and full paths; bare /db-status etc. for Vercel (often strips /api prefix on invoke)
+  app.use("/api", router);
+  app.use(router);
 
   return app;
 }
