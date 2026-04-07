@@ -202,7 +202,6 @@ export function createApiApp(): express.Express {
     }
   });
 
-  // /api/... for local and full paths; bare /db-status etc. for Vercel (often strips /api prefix on invoke)
   app.use("/api", router);
   app.use(router);
 

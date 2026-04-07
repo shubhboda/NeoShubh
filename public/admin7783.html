@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Access</title>
+  </head>
+  <body>
+    <script>
+      // Admin gate: open this file to unlock admin panel locally.
+      // Then redirect to the main app route.
+      try {
+        sessionStorage.setItem("ayurveda_admin", "1");
+      } catch (e) {}
+      // Redirect after setting flag
+      window.location.replace("/");
+    </script>
+  </body>
+</html>
+

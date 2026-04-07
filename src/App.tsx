@@ -19,6 +19,14 @@ function apiUrl(path: string): string {
   return API_BASE ? `${API_BASE}${p}` : p;
 }
 
+type OutputLang = "hindi" | "english";
+function detectOutputLanguage(text: string): OutputLang {
+  // Simple heuristic: if the user uses mostly Devanagari, respond in Hindi; otherwise English.
+  const devanagari = (text.match(/[\u0900-\u097F]/g) ?? []).length;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  return devanagari > latin ? "hindi" : "english";
+}
+
 /** Browser SDK throws if apiKey is null/undefined; avoid that so the UI can still mount. */
 let geminiSingleton: GoogleGenAI | null | undefined;
 function getGeminiClient(): GoogleGenAI | null {
@@ -52,6 +60,7 @@ export default function App() {
     typeof process.env.GEMINI_API_KEY === "string" &&
     process.env.GEMINI_API_KEY.trim().length > 0;
 
+  const [isAdmin, setIsAdmin] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -79,6 +88,13 @@ export default function App() {
   const [bulkProgress, setBulkProgress] = useState("");
   const bulkFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Admin only via `admin7783.html` (which sets localStorage).
+    if (typeof window !== "undefined") {
+      if (sessionStorage.getItem("ayurveda_admin") === "1") setIsAdmin(true);
+    }
+  }, []);
 
   const addDebug = (msg: string) => {
     setDebugInfo(prev => [new Date().toLocaleTimeString() + ": " + msg, ...prev].slice(0, 5));
@@ -346,27 +362,35 @@ export default function App() {
         return;
       }
 
+      const outLang = detectOutputLanguage(currentInput);
+      const outLangInstruction =
+        outLang === "hindi"
+          ? "Answer ONLY in Hindi (Devanagari). Do not use English words unless unavoidable."
+          : "Answer ONLY in English. Do not use Hindi words.";
+
       // 3. Generate final answer using Gemini in the frontend
       const prompt = `
-        You are an Ayurveda expert. Use the following context to answer the user's health query in Hinglish (Hindi + English mix).
+        You are an Ayurveda expert. ${outLangInstruction}
+        Answer the user's query concisely using only the CONTEXT text below.
         
-        Context:
+        CONTEXT (Ayurveda knowledge, may be partial):
         ${context}
         
-        User Query: ${currentInput}
+        USER QUERY:
+        ${currentInput}
         
-        Instructions:
-        1. Identify the problem clearly.
-        2. Provide:
-           - Diet (What to eat)
-           - Avoid (What not to eat)
-           - Herbs (Ayurvedic remedies)
-           - Lifestyle tips
-        3. Only use the provided context. Do not hallucinate.
-        4. If the context doesn't contain the answer, say: "Iska Ayurveda data available nahi hai".
-        5. Keep the tone helpful and traditional.
+        STRICT RULES:
+        - Answer must be SHORT: max 6 bullet points OR 6 short paragraphs total.
+        - Do NOT repeat long background history unless it directly helps the answer.
+        - If context does NOT talk about some part (e.g. diet, herbs), clearly say
+          "Iska Ayurveda data context me nahi mila" instead of guessing.
+        - Never invent new facts that are not in CONTEXT.
+        - If nothing relevant is found, reply exactly:
+          "Iska Ayurveda data available nahi hai".
         
-        Format the response in Markdown with clear headings.
+        FORMAT:
+        - Use clear headings only when really needed.
+        - Focus only on what user asked, not everything in the context.
       `;
 
       const response = await gemini.models.generateContent({
@@ -481,31 +505,55 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight text-emerald-900">Ayurveda Nutrition System</h1>
           </div>
           <div className="flex items-center gap-2">
-            <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-              dbStatus === "connected" ? (dbDetails?.vectorExtension && dbDetails?.tableExists ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700") : 
-              dbStatus === "error" ? "bg-red-100 text-red-700" : "bg-stone-100 text-stone-500"
-            }`}>
-              <div className={`w-1.5 h-1.5 rounded-full ${
-                dbStatus === "connected" ? (dbDetails?.vectorExtension && dbDetails?.tableExists ? "bg-emerald-500 animate-pulse" : "bg-amber-500") : 
-                dbStatus === "error" ? "bg-red-500" : "bg-stone-400"
-              }`} />
-              {dbStatus === "connected" ? (dbDetails?.vectorExtension && dbDetails?.tableExists ? "DB Online" : "Setup Req.") : dbStatus === "error" ? "DB Offline" : "Checking DB"}
-            </div>
-            <button 
-              onClick={() => setShowAdmin(!showAdmin)}
-              className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors"
-            >
-              <Database className="w-3 h-3" />
-              {showAdmin ? "Close Manager" : "Manage Knowledge"}
-            </button>
-            <button 
-              onClick={seedDatabase}
-              disabled={isSeeding}
-              className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50"
-            >
-              <Sparkles className="w-3 h-3" />
-              {isSeeding ? "Seeding..." : "Seed Knowledge Base"}
-            </button>
+            {isAdmin && (
+              <>
+                <div
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                    dbStatus === "connected"
+                      ? dbDetails?.vectorExtension && dbDetails?.tableExists
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-amber-100 text-amber-700"
+                      : dbStatus === "error"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-stone-100 text-stone-500"
+                  }`}
+                >
+                  <div
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      dbStatus === "connected"
+                        ? dbDetails?.vectorExtension && dbDetails?.tableExists
+                          ? "bg-emerald-500 animate-pulse"
+                          : "bg-amber-500"
+                        : dbStatus === "error"
+                        ? "bg-red-500"
+                        : "bg-stone-400"
+                    }`}
+                  />
+                  {dbStatus === "connected"
+                    ? dbDetails?.vectorExtension && dbDetails?.tableExists
+                      ? "DB Online"
+                      : "Setup Req."
+                    : dbStatus === "error"
+                    ? "DB Offline"
+                    : "Checking DB"}
+                </div>
+                <button
+                  onClick={() => setShowAdmin(!showAdmin)}
+                  className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors"
+                >
+                  <Database className="w-3 h-3" />
+                  {showAdmin ? "Close Manager" : "Manage Knowledge"}
+                </button>
+                <button
+                  onClick={seedDatabase}
+                  disabled={isSeeding}
+                  className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  {isSeeding ? "Seeding..." : "Seed Knowledge Base"}
+                </button>
+              </>
+            )}
           </div>
         </div>
       </header>

@@ -1,6 +1,8 @@
-import { createApiApp } from "../apiApp";
+import { createApiApp } from "./apiApp";
 
-/**
- * Vercel serverless: all `/api/*` routes (rewritten here) are handled by this Express app.
- */
+/** Hobby: 10s default; give DB connect + cold start slack on Pro; harmless on Hobby if capped. */
+export const config = {
+  maxDuration: 60,
+};
+
 export default createApiApp();
