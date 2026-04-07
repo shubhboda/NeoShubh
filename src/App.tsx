@@ -354,43 +354,48 @@ export default function App() {
 
       const { context } = await searchResponse.json();
       
-      if (!context) {
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now().toString(), role: "bot", content: "Iska Ayurveda data available nahi hai" },
-        ]);
-        return;
-      }
-
       const outLang = detectOutputLanguage(currentInput);
       const outLangInstruction =
         outLang === "hindi"
           ? "Answer ONLY in Hindi (Devanagari). Do not use English words unless unavoidable."
           : "Answer ONLY in English. Do not use Hindi words.";
 
+      if (!context) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: "bot",
+            content:
+              outLang === "hindi"
+                ? "Iska Ayurveda data available nahi hai"
+                : "No relevant Ayurveda data found in the uploaded knowledge base.",
+          },
+        ]);
+        return;
+      }
+
       // 3. Generate final answer using Gemini in the frontend
       const prompt = `
         You are an Ayurveda expert. ${outLangInstruction}
-        Answer the user's query concisely using only the CONTEXT text below.
+        Use ONLY the CONTEXT below to answer.
         
-        CONTEXT (Ayurveda knowledge, may be partial):
+        If CONTEXT does not support the answer, reply with:
+        - Hindi: "Iska Ayurveda data available nahi hai"
+        - English: "No relevant Ayurveda data found in the uploaded knowledge base."
+
+        CONTEXT:
         ${context}
-        
+
         USER QUERY:
         ${currentInput}
-        
-        STRICT RULES:
-        - Answer must be SHORT: max 6 bullet points OR 6 short paragraphs total.
-        - Do NOT repeat long background history unless it directly helps the answer.
-        - If context does NOT talk about some part (e.g. diet, herbs), clearly say
-          "Iska Ayurveda data context me nahi mila" instead of guessing.
-        - Never invent new facts that are not in CONTEXT.
-        - If nothing relevant is found, reply exactly:
-          "Iska Ayurveda data available nahi hai".
-        
-        FORMAT:
-        - Use clear headings only when really needed.
-        - Focus only on what user asked, not everything in the context.
+
+        OUTPUT (max 6 bullets total, max ~120 words overall):
+        - Diet:
+        - Avoid:
+        - Herbs:
+        - Lifestyle:
+        Only write a line if that info is present in CONTEXT; otherwise omit that line.
       `;
 
       const response = await gemini.models.generateContent({

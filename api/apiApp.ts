@@ -154,11 +154,17 @@ export function createApiApp(): express.Express {
       );
       client.release();
 
+      const maxCharsPerChunk = 800;
       const context = searchResult.rows
         .filter((row) => row.similarity > 0.5)
         .map((row) => {
           const t = (row.topic ?? "").trim();
-          return t ? `Topic: ${t}\n\n${row.content}` : row.content;
+          const raw = (row.content ?? "").trim();
+          const clipped =
+            raw.length > maxCharsPerChunk
+              ? raw.slice(0, maxCharsPerChunk).trim() + "..."
+              : raw;
+          return t ? `Topic: ${t}\n\n${clipped}` : clipped;
         })
         .join("\n\n");
 
