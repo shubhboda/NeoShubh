@@ -15,6 +15,9 @@ async function startServer() {
   }
 
   if (process.env.NODE_ENV !== "production") {
+    // Serve public directory files (like admin7783.html) BEFORE Vite middleware
+    app.use(express.static(path.join(process.cwd(), "public")));
+    
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

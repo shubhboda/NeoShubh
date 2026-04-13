@@ -6,6 +6,7 @@ import { GoogleGenAI } from "@google/genai";
 import { parseKnowledgeCsv, type KnowledgeRow } from "./parseKnowledgeCsv";
 
 const BULK_INGEST_CHUNK = 12;
+const DEFAULT_KNOWLEDGE_BASE = "ayurveda_knowledge";
 
 /** Same origin on Vercel; set only if API is hosted on another domain. */
 const API_BASE_RAW = import.meta.env.VITE_API_BASE_URL;
@@ -86,13 +87,27 @@ export default function App() {
   const [isInitializing, setIsInitializing] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkProgress, setBulkProgress] = useState("");
+  const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(DEFAULT_KNOWLEDGE_BASE);
   const bulkFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Admin only via `admin7783.html` (which sets localStorage).
+    // Admin unlock can come from admin page or direct URL token.
     if (typeof window !== "undefined") {
-      if (sessionStorage.getItem("ayurveda_admin") === "1") setIsAdmin(true);
+      const params = new URLSearchParams(window.location.search);
+      const urlToken = params.get("admin");
+      if (urlToken === "7783") {
+        sessionStorage.setItem("ayurveda_admin", "1");
+        localStorage.setItem("ayurveda_admin", "1");
+        params.delete("admin");
+        const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", next);
+      }
+
+      const unlocked =
+        sessionStorage.getItem("ayurveda_admin") === "1" ||
+        localStorage.getItem("ayurveda_admin") === "1";
+      if (unlocked) setIsAdmin(true);
     }
   }, []);
 
@@ -104,7 +119,9 @@ export default function App() {
     setIsLoadingKnowledge(true);
     try {
       addDebug("Fetching knowledge list...");
-      const res = await fetch(apiUrl("/api/list-knowledge"));
+      const res = await fetch(
+        apiUrl(`/api/list-knowledge?knowledgeBase=${encodeURIComponent(selectedKnowledgeBase)}`)
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Fetch failed");
       setSavedKnowledge(data.items || []);
@@ -120,7 +137,7 @@ export default function App() {
   const checkDbStatus = async () => {
     try {
       addDebug("Checking DB status...");
-      const res = await fetch(apiUrl("/api/db-status"));
+      const res = await fetch(apiUrl(`/api/db-status?knowledgeBase=${encodeURIComponent(selectedKnowledgeBase)}`));
       const data = await res.json();
       if (data.status === "connected") {
         setDbStatus("connected");
@@ -143,7 +160,11 @@ export default function App() {
     setIsInitializing(true);
     addDebug("Starting DB initialization...");
     try {
-      const res = await fetch(apiUrl("/api/init-db"), { method: "POST" });
+      const res = await fetch(apiUrl("/api/init-db"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ knowledgeBase: selectedKnowledgeBase }),
+      });
       const data = await res.json();
       if (res.ok) {
         alert("Database initialized successfully!");
@@ -163,7 +184,24 @@ export default function App() {
 
   useEffect(() => {
     checkDbStatus();
-  }, []);
+  }, [selectedKnowledgeBase]);
+
+  const askKnowledgeBaseForUpload = () => {
+    const candidate = window
+      .prompt(
+        "CSV kis knowledge base/table me import karna hai? (example: ayurveda_knowledge, charakshita_knowledge)",
+        selectedKnowledgeBase
+      )
+      ?.trim()
+      .toLowerCase();
+    if (!candidate) return null;
+    if (!/^[a-z][a-z0-9_]{0,62}$/.test(candidate)) {
+      alert("Invalid name. Sirf lowercase letters, numbers, underscore allow hain.");
+      return null;
+    }
+    setSelectedKnowledgeBase(candidate);
+    return candidate;
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -175,7 +213,8 @@ export default function App() {
 
   const ingestEmbeddingBatches = async (
     withEmb: { topic: string; content: string; embedding: number[] }[],
-    totalLabel: number
+    totalLabel: number,
+    knowledgeBase: string
   ) => {
     for (let i = 0; i < withEmb.length; i += BULK_INGEST_CHUNK) {
       const chunk = withEmb.slice(i, i + BULK_INGEST_CHUNK);
@@ -185,7 +224,7 @@ export default function App() {
       const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: chunk }),
+        body: JSON.stringify({ data: chunk, knowledgeBase }),
       });
       const resData = await response.json();
       if (!response.ok) {
@@ -194,7 +233,7 @@ export default function App() {
     }
   };
 
-  const runBulkKnowledgeImport = async (raw: string, label: string) => {
+  const runBulkKnowledgeImport = async (raw: string, label: string, knowledgeBase: string) => {
     if (isBulkImporting || isIngesting) return;
     let rows: KnowledgeRow[];
     try {
@@ -241,9 +280,9 @@ export default function App() {
         await new Promise((r) => setTimeout(r, 100));
       }
 
-      await ingestEmbeddingBatches(withEmb, rows.length);
+      await ingestEmbeddingBatches(withEmb, rows.length, knowledgeBase);
       addDebug(`Bulk import done: ${rows.length} rows from ${label}`);
-      alert(`${rows.length} topics successfully import ho gaye (${label}).`);
+      alert(`${rows.length} topics successfully import ho gaye (${label}) in "${knowledgeBase}".`);
       fetchKnowledge();
     } catch (error) {
       console.error("Bulk import error:", error);
@@ -286,6 +325,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           data: [{ topic, content: body, embedding }],
+          knowledgeBase: selectedKnowledgeBase,
         }),
       });
 
@@ -349,7 +389,7 @@ export default function App() {
       const searchResponse = await fetch(apiUrl("/api/search"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embedding: queryEmbedding }),
+        body: JSON.stringify({ embedding: queryEmbedding, knowledgeBase: selectedKnowledgeBase }),
       });
 
       const { context } = await searchResponse.json();
@@ -475,7 +515,7 @@ export default function App() {
       const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: dataWithEmbeddings }),
+        body: JSON.stringify({ data: dataWithEmbeddings, knowledgeBase: selectedKnowledgeBase }),
       });
       const resData = await response.json();
       if (!response.ok) {
@@ -593,6 +633,22 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                <div className="mb-4">
+                  <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
+                    Active Knowledge Base (Table Name)
+                  </label>
+                  <input
+                    type="text"
+                    value={selectedKnowledgeBase}
+                    onChange={(e) => setSelectedKnowledgeBase(e.target.value.trim().toLowerCase())}
+                    placeholder="e.g. ayurveda_knowledge or charakshita_knowledge"
+                    className="w-full bg-white border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  />
+                  <p className="mt-1.5 text-[11px] text-stone-500 leading-relaxed">
+                    Chat search, list, single ingest, and CSV import is table naam par chalega.
+                  </p>
+                </div>
                 
                 <p className="text-xs text-stone-500 mb-4 leading-relaxed">
                   If you see "Dimension Mismatch" errors (expected 768, got 3072), click the button below to recreate the table with correct settings. 
@@ -652,9 +708,14 @@ export default function App() {
                       const file = e.target.files?.[0];
                       const inputEl = e.target;
                       if (!file) return;
+                      const knowledgeBase = askKnowledgeBaseForUpload();
+                      if (!knowledgeBase) {
+                        inputEl.value = "";
+                        return;
+                      }
                       const text = await file.text();
                       inputEl.value = "";
-                      await runBulkKnowledgeImport(text, file.name);
+                      await runBulkKnowledgeImport(text, file.name, knowledgeBase);
                     }}
                   />
                   <div className="flex flex-wrap gap-2">
@@ -676,13 +737,15 @@ export default function App() {
                       disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
                       onClick={async () => {
                         try {
+                          const knowledgeBase = askKnowledgeBaseForUpload();
+                          if (!knowledgeBase) return;
                           const res = await fetch("/sushruta_sam.csv");
                           if (!res.ok) {
                             alert("sushruta_sam.csv load nahi hua — public/ folder check karein.");
                             return;
                           }
                           const text = await res.text();
-                          await runBulkKnowledgeImport(text, "sushruta_sam.csv (bundled)");
+                          await runBulkKnowledgeImport(text, "sushruta_sam.csv (bundled)", knowledgeBase);
                         } catch {
                           alert("Sample CSV fetch failed.");
                         }

@@ -23,6 +23,64 @@ export function getPool(): pg.Pool {
 }
 
 let warmupPromise: Promise<void> | null = null;
+const DEFAULT_KNOWLEDGE_TABLE = "ayurveda_knowledge";
+
+function normalizeTableName(input: unknown): string {
+  const raw = typeof input === "string" ? input.trim().toLowerCase() : "";
+  const candidate = raw || DEFAULT_KNOWLEDGE_TABLE;
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(candidate)) {
+    throw new Error(
+      "Invalid knowledgeBase name. Use only lowercase letters, numbers, and underscore (start with letter)."
+    );
+  }
+  return candidate;
+}
+
+function ensureSafeIdentifier(identifier: string): string {
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(identifier)) {
+    throw new Error("Unsafe SQL identifier");
+  }
+  return `"${identifier}"`;
+}
+
+async function ensureKnowledgeTable(client: pg.PoolClient, tableName: string): Promise<void> {
+  const table = ensureSafeIdentifier(tableName);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS ${table} (
+      id SERIAL PRIMARY KEY,
+      topic TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL,
+      embedding vector(3072)
+    );
+  `);
+  await client.query(`
+    ALTER TABLE ${table}
+    ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT '';
+  `);
+
+  const dimCheck = await client.query<{ embedding_type: string | null }>(
+    `
+      SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS embedding_type
+      FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = to_regclass($1)
+        AND a.attname = 'embedding'
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+      LIMIT 1;
+    `,
+    [`public.${tableName}`]
+  );
+
+  const embeddingType = dimCheck.rows[0]?.embedding_type ?? null;
+  if (embeddingType && embeddingType !== "vector(3072)") {
+    // Old tables may still have vector(1536). Recreate embedding column in 3072 to avoid ingest failures.
+    await client.query(`ALTER TABLE ${table} DROP COLUMN embedding;`);
+    await client.query(`ALTER TABLE ${table} ADD COLUMN embedding vector(3072);`);
+    console.warn(
+      `Knowledge base "${tableName}" had ${embeddingType}; embedding column reset to vector(3072).`
+    );
+  }
+}
 
 /** Runs once: extension + table. Safe to call multiple times (same promise). */
 export function warmupDatabase(): Promise<void> {
@@ -32,18 +90,7 @@ export function warmupDatabase(): Promise<void> {
       const client = await p.connect();
       try {
         await client.query("CREATE EXTENSION IF NOT EXISTS vector;");
-        await client.query(`
-      CREATE TABLE IF NOT EXISTS ayurveda_knowledge (
-        id SERIAL PRIMARY KEY,
-        topic TEXT NOT NULL DEFAULT '',
-        content TEXT NOT NULL,
-        embedding vector(3072)
-      );
-    `);
-        await client.query(`
-      ALTER TABLE ayurveda_knowledge
-      ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT '';
-    `);
+        await ensureKnowledgeTable(client, DEFAULT_KNOWLEDGE_TABLE);
         console.log("Database initialized successfully.");
       } finally {
         client.release();
@@ -77,12 +124,15 @@ export function createApiApp(): express.Express {
   const router = express.Router();
 
   router.post("/init-db", async (req, res) => {
+    let tableName = DEFAULT_KNOWLEDGE_TABLE;
     try {
+      tableName = normalizeTableName(req.body?.knowledgeBase);
+      const table = ensureSafeIdentifier(tableName);
       const c = await getPool().connect();
       await c.query("CREATE EXTENSION IF NOT EXISTS vector;");
-      await c.query("DROP TABLE IF EXISTS ayurveda_knowledge;");
+      await c.query(`DROP TABLE IF EXISTS ${table};`);
       await c.query(`
-        CREATE TABLE ayurveda_knowledge (
+        CREATE TABLE ${table} (
           id SERIAL PRIMARY KEY,
           topic TEXT NOT NULL DEFAULT '',
           content TEXT NOT NULL,
@@ -90,17 +140,22 @@ export function createApiApp(): express.Express {
         );
       `);
       c.release();
-      res.json({ message: "Database initialized successfully with 3072 dimensions" });
+      res.json({
+        message: `Knowledge base "${tableName}" initialized successfully with 3072 dimensions`,
+      });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : "Initialization failed" });
     }
   });
 
   router.get("/list-knowledge", async (req, res) => {
+    let tableName = DEFAULT_KNOWLEDGE_TABLE;
     try {
+      tableName = normalizeTableName(req.query.knowledgeBase);
+      const table = ensureSafeIdentifier(tableName);
       const client = await getPool().connect();
       const result = await client.query(
-        "SELECT id, topic, content FROM ayurveda_knowledge ORDER BY id DESC LIMIT 200;"
+        `SELECT id, topic, content FROM ${table} ORDER BY id DESC LIMIT 200;`
       );
       client.release();
       res.json({ items: result.rows });
@@ -110,18 +165,22 @@ export function createApiApp(): express.Express {
   });
 
   router.get("/db-status", async (req, res) => {
+    let tableName = DEFAULT_KNOWLEDGE_TABLE;
     try {
+      tableName = normalizeTableName(req.query.knowledgeBase);
       const client = await getPool().connect();
-      const extCheck = await client.query("SELECT * FROM pg_extension WHERE extname = 'vector';");
-      const tableCheck = await client.query(`
+      const tableExistsQuery = `
         SELECT EXISTS (
           SELECT FROM information_schema.tables 
-          WHERE table_name = 'ayurveda_knowledge'
+          WHERE table_name = $1
         );
-      `);
+      `;
+      const extCheck = await client.query("SELECT * FROM pg_extension WHERE extname = 'vector';");
+      const tableCheck = await client.query(tableExistsQuery, [tableName]);
       client.release();
       res.json({
         status: "connected",
+        knowledgeBase: tableName,
         vectorExtension: extCheck.rows.length > 0,
         tableExists: tableCheck.rows[0].exists,
       });
@@ -134,19 +193,22 @@ export function createApiApp(): express.Express {
   });
 
   router.post("/search", async (req, res) => {
-    const { embedding } = req.body;
+    const { embedding, knowledgeBase } = req.body;
 
     if (!embedding || !Array.isArray(embedding)) {
       return res.status(400).json({ error: "Embedding is required" });
     }
 
     try {
+      const tableName = normalizeTableName(knowledgeBase);
+      const table = ensureSafeIdentifier(tableName);
       const client = await getPool().connect();
+      await ensureKnowledgeTable(client, tableName);
       const vectorStr = `[${embedding.join(",")}]`;
       const searchResult = await client.query(
         `
         SELECT topic, content, 1 - (embedding <=> $1::vector) as similarity
-        FROM ayurveda_knowledge
+        FROM ${table}
         ORDER BY embedding <=> $1::vector
         LIMIT 3;
       `,
@@ -176,14 +238,17 @@ export function createApiApp(): express.Express {
   });
 
   router.post("/ingest", async (req, res) => {
-    const { data } = req.body;
+    const { data, knowledgeBase } = req.body;
 
     if (!data || !Array.isArray(data)) {
       return res.status(400).json({ error: "Invalid data format" });
     }
 
     try {
+      const tableName = normalizeTableName(knowledgeBase);
+      const table = ensureSafeIdentifier(tableName);
       const client = await getPool().connect();
+      await ensureKnowledgeTable(client, tableName);
       for (const item of data) {
         if (typeof item.content !== "string" || !item.content.trim()) {
           client.release();
@@ -196,7 +261,7 @@ export function createApiApp(): express.Express {
         const topic = typeof item.topic === "string" ? item.topic.trim() : "";
         const vectorStr = `[${item.embedding.join(",")}]`;
         await client.query(
-          "INSERT INTO ayurveda_knowledge (topic, content, embedding) VALUES ($1, $2, $3::vector)",
+          `INSERT INTO ${table} (topic, content, embedding) VALUES ($1, $2, $3::vector)`,
           [topic, item.content.trim(), vectorStr]
         );
       }
