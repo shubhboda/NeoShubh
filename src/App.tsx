@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from "react";
 import { Send, Bot, User, Sparkles, Leaf, Info, AlertCircle, Loader2, Database, Upload } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
-import { GoogleGenAI } from "@google/genai";
 import { parseKnowledgeCsv, type KnowledgeRow } from "./parseKnowledgeCsv";
 
 const BULK_INGEST_CHUNK = 12;
@@ -28,20 +27,6 @@ function detectOutputLanguage(text: string): OutputLang {
   return devanagari > latin ? "hindi" : "english";
 }
 
-/** Browser SDK throws if apiKey is null/undefined; avoid that so the UI can still mount. */
-let geminiSingleton: GoogleGenAI | null | undefined;
-function getGeminiClient(): GoogleGenAI | null {
-  if (geminiSingleton !== undefined) return geminiSingleton;
-  const key =
-    typeof process.env.GEMINI_API_KEY === "string" ? process.env.GEMINI_API_KEY.trim() : "";
-  if (!key) {
-    geminiSingleton = null;
-    return null;
-  }
-  geminiSingleton = new GoogleGenAI({ apiKey: key });
-  return geminiSingleton;
-}
-
 function geminiMissingMessage() {
   return (
     "GEMINI_API_KEY set nahi hai.\n\n" +
@@ -57,9 +42,7 @@ interface Message {
 }
 
 export default function App() {
-  const hasGeminiKey =
-    typeof process.env.GEMINI_API_KEY === "string" &&
-    process.env.GEMINI_API_KEY.trim().length > 0;
+  const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(true);
 
   const [isAdmin, setIsAdmin] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -83,6 +66,13 @@ export default function App() {
   const [dbStatus, setDbStatus] = useState<"checking" | "connected" | "error">("checking");
   const [dbDetails, setDbDetails] = useState<{vectorExtension: boolean, tableExists: boolean} | null>(null);
   const [dbError, setDbError] = useState("");
+  const [graphStatus, setGraphStatus] = useState<"checking" | "connected" | "error">("checking");
+  const [graphError, setGraphError] = useState("");
+  const [isGraphInitLoading, setIsGraphInitLoading] = useState(false);
+  const [isGraphBuildLoading, setIsGraphBuildLoading] = useState(false);
+  const [isGraphResetLoading, setIsGraphResetLoading] = useState(false);
+  const [graphBuildSummary, setGraphBuildSummary] = useState("");
+  const [graphSourceTables, setGraphSourceTables] = useState("animal_pet");
   const [debugInfo, setDebugInfo] = useState<string[]>([]);
   const [isInitializing, setIsInitializing] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
@@ -90,6 +80,19 @@ export default function App() {
   const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(DEFAULT_KNOWLEDGE_BASE);
   const bulkFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(apiUrl("/api/ai-status"));
+        const data = await res.json();
+        setHasGeminiKey(Boolean(data?.hasGeminiKey));
+      } catch {
+        // If backend is unreachable, keep the banner visible so user knows something is wrong.
+        setHasGeminiKey(false);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     // Admin unlock can come from admin page or direct URL token.
@@ -156,6 +159,121 @@ export default function App() {
     }
   };
 
+  const checkGraphStatus = async () => {
+    try {
+      addDebug("Checking Neo4j status...");
+      const res = await fetch(apiUrl("/api/graph/health"));
+      const data = await res.json();
+      if (!res.ok || data.status !== "connected") {
+        setGraphStatus("error");
+        setGraphError(data.message || "Neo4j not connected");
+        addDebug("Neo4j error: " + (data.message || "Unknown error"));
+        return;
+      }
+      setGraphStatus("connected");
+      setGraphError("");
+      addDebug("Neo4j connected");
+    } catch (error) {
+      setGraphStatus("error");
+      setGraphError(error instanceof Error ? error.message : "Neo4j check failed");
+      addDebug("Neo4j check failed");
+    }
+  };
+
+  const runGraphInit = async (): Promise<boolean> => {
+    setIsGraphInitLoading(true);
+    try {
+      addDebug("Initializing graph schema...");
+      const res = await fetch(apiUrl("/api/graph/init"), { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Graph init failed");
+      setGraphBuildSummary("Graph schema initialized.");
+      addDebug("Graph schema ready");
+      await checkGraphStatus();
+      return true;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Graph init failed";
+      setGraphError(msg);
+      setGraphStatus("error");
+      addDebug("Graph init error: " + msg);
+      alert(`Graph init failed: ${msg}`);
+      return false;
+    } finally {
+      setIsGraphInitLoading(false);
+    }
+  };
+
+  const runGraphBuildFromExisting = async (): Promise<boolean> => {
+    const tables = graphSourceTables
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+    if (tables.length === 0) {
+      alert("At least one source table required.");
+      return false;
+    }
+
+    setIsGraphBuildLoading(true);
+    try {
+      addDebug(`Graph build started for ${tables.length} table(s)`);
+      const res = await fetch(apiUrl("/api/graph/build-from-existing-knowledge"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          knowledgeBases: tables,
+          // Keep default build quick in UI; run multiple times for full ingest.
+          limitPerTable: 20,
+          extractionIntervalMs: 0,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Graph build failed");
+      const summary = `Processed ${data.processedRows}, extracted ${data.extractedRows}, imported ${data.imported}, failed ${data.failedExtractions}`;
+      setGraphBuildSummary(summary);
+      addDebug("Graph build done: " + summary);
+      await checkGraphStatus();
+      return true;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Graph build failed";
+      setGraphError(msg);
+      setGraphStatus("error");
+      addDebug("Graph build error: " + msg);
+      alert(`Graph build failed: ${msg}`);
+      return false;
+    } finally {
+      setIsGraphBuildLoading(false);
+    }
+  };
+
+  const runGraphReset = async (): Promise<boolean> => {
+    setIsGraphResetLoading(true);
+    try {
+      addDebug("Resetting graph...");
+      const res = await fetch(apiUrl("/api/graph/reset"), { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Graph reset failed");
+      setGraphBuildSummary("Graph reset complete. Build graph again.");
+      addDebug("Graph reset done");
+      await checkGraphStatus();
+      return true;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Graph reset failed";
+      setGraphError(msg);
+      setGraphStatus("error");
+      addDebug("Graph reset error: " + msg);
+      alert(`Graph reset failed: ${msg}`);
+      return false;
+    } finally {
+      setIsGraphResetLoading(false);
+    }
+  };
+
+  const runFullGraphSetup = async () => {
+    const inited = await runGraphInit();
+    if (!inited) return;
+    await runGraphBuildFromExisting();
+  };
+
   const initializeDb = async () => {
     setIsInitializing(true);
     addDebug("Starting DB initialization...");
@@ -184,6 +302,7 @@ export default function App() {
 
   useEffect(() => {
     checkDbStatus();
+    checkGraphStatus();
   }, [selectedKnowledgeBase]);
 
   const askKnowledgeBaseForUpload = () => {
@@ -212,7 +331,7 @@ export default function App() {
   }, [messages]);
 
   const ingestEmbeddingBatches = async (
-    withEmb: { topic: string; content: string; embedding: number[] }[],
+    withEmb: { topic: string; content: string }[],
     totalLabel: number,
     knowledgeBase: string
   ) => {
@@ -221,14 +340,14 @@ export default function App() {
       const end = Math.min(i + chunk.length, withEmb.length);
       setBulkProgress(`Saving ${i + 1}–${end} / ${totalLabel}…`);
       addDebug(`Ingest batch ${i / BULK_INGEST_CHUNK + 1}`);
-      const response = await fetch(apiUrl("/api/ingest"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: chunk, knowledgeBase }),
-      });
-      const resData = await response.json();
-      if (!response.ok) {
-        throw new Error(resData.error || "Batch ingest failed");
+      for (const item of chunk) {
+        const response = await fetch(apiUrl("/api/graph/ingest-text"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topic: item.topic, content: item.content }),
+        });
+        const resData = await response.json();
+        if (!response.ok) throw new Error(resData.error || "Batch ingest failed");
       }
     }
   };
@@ -248,42 +367,29 @@ export default function App() {
     }
 
     const ok = confirm(
-      `${rows.length} alag topics import honge (alag-alag DB rows). Gemini se embedding ${rows.length} baar banegi — thoda time lagega. Continue?`
+      `${rows.length} alag topics import honge. Server par graph extraction + save hoga — thoda time lagega. Continue?`
     );
     if (!ok) return;
-
-    const gemini = getGeminiClient();
-    if (!gemini) {
-      alert(geminiMissingMessage());
-      return;
-    }
 
     setIsBulkImporting(true);
     setBulkProgress("");
 
     try {
-      const withEmb: { topic: string; content: string; embedding: number[] }[] = [];
+      const withEmb: { topic: string; content: string }[] = [];
       for (let i = 0; i < rows.length; i++) {
         const { topic, content } = rows[i];
-        setBulkProgress(`Embedding ${i + 1} / ${rows.length}: ${topic.slice(0, 48)}…`);
-        addDebug(`Bulk embed ${i + 1}/${rows.length}`);
-        const textForEmbedding = `Topic: ${topic}\n\n${content}`;
-        const embeddingResult = await gemini.models.embedContent({
-          model: "gemini-embedding-2-preview",
-          contents: [textForEmbedding],
-        });
         withEmb.push({
           topic,
           content,
-          embedding: embeddingResult.embeddings[0].values,
         });
-        await new Promise((r) => setTimeout(r, 100));
+        setBulkProgress(`Preparing ${i + 1} / ${rows.length}: ${topic.slice(0, 48)}…`);
+        addDebug(`Bulk queue ${i + 1}/${rows.length}`);
       }
 
       await ingestEmbeddingBatches(withEmb, rows.length, knowledgeBase);
       addDebug(`Bulk import done: ${rows.length} rows from ${label}`);
-      alert(`${rows.length} topics successfully import ho gaye (${label}) in "${knowledgeBase}".`);
-      fetchKnowledge();
+      alert(`${rows.length} topics successfully import ho gaye (${label}).`);
+      await checkGraphStatus();
     } catch (error) {
       console.error("Bulk import error:", error);
       const errMsg = error instanceof Error ? error.message : "Bulk import failed";
@@ -298,34 +404,19 @@ export default function App() {
   const handleIngestCustom = async () => {
     if (!customKnowledge.trim() || isIngesting || isBulkImporting) return;
 
-    const gemini = getGeminiClient();
-    if (!gemini) {
-      alert(geminiMissingMessage());
-      return;
-    }
-
     setIsIngesting(true);
 
     const topic = knowledgeTopic.trim();
     const body = customKnowledge.trim();
-    const textForEmbedding = topic ? `Topic: ${topic}\n\n${body}` : body;
 
     try {
-      addDebug("Generating embedding...");
-      const embeddingResult = await gemini.models.embedContent({
-        model: "gemini-embedding-2-preview",
-        contents: [textForEmbedding],
-      });
-      const embedding = embeddingResult.embeddings[0].values;
-      addDebug(`Embedding generated (Size: ${embedding.length})`);
-
-      addDebug("Sending to backend...");
-      const response = await fetch(apiUrl("/api/ingest"), {
+      addDebug("Sending to backend (graph extract + save)...");
+      const response = await fetch(apiUrl("/api/graph/ingest-text"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          data: [{ topic, content: body, embedding }],
-          knowledgeBase: selectedKnowledgeBase,
+          topic,
+          content: body,
         }),
       });
 
@@ -334,10 +425,10 @@ export default function App() {
         throw new Error(resData.error || "Ingestion failed");
       }
       addDebug("Ingestion successful");
-      alert(resData.message || "Knowledge added successfully!");
+      alert(resData.message || "Graph added successfully!");
       setCustomKnowledge("");
       setKnowledgeTopic("");
-      fetchKnowledge(); // Refresh the list
+      await checkGraphStatus();
     } catch (error) {
       console.error("Ingestion error:", error);
       const errMsg = error instanceof Error ? error.message : "Failed to add knowledge";
@@ -364,97 +455,36 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const gemini = getGeminiClient();
-      if (!gemini) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "bot",
-            content:
-              "**GEMINI_API_KEY** live site par set nahi hai. Vercel → Environment Variables → add karein aur redeploy karein.",
-          },
-        ]);
-        return;
-      }
-
-      // 1. Generate embedding for the query in the frontend
-      const embeddingResult = await gemini.models.embedContent({
-        model: "gemini-embedding-2-preview",
-        contents: [currentInput],
-      });
-      const queryEmbedding = embeddingResult.embeddings[0].values;
-
-      // 2. Call backend to search for context
-      const searchResponse = await fetch(apiUrl("/api/search"), {
+      // Server-side RAG: /api/ask does embedding + DB retrieval + final generation.
+      const askResponse = await fetch(apiUrl("/api/ask"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embedding: queryEmbedding, knowledgeBase: selectedKnowledgeBase }),
+        body: JSON.stringify({ query: currentInput, knowledgeBase: selectedKnowledgeBase }),
       });
 
-      const { context } = await searchResponse.json();
-      
-      const outLang = detectOutputLanguage(currentInput);
-      const outLangInstruction =
-        outLang === "hindi"
-          ? "Answer ONLY in Hindi (Devanagari). Do not use English words unless unavoidable."
-          : "Answer ONLY in English. Do not use Hindi words.";
-
-      if (!context) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "bot",
-            content:
-              outLang === "hindi"
-                ? "Iska Ayurveda data available nahi hai"
-                : "No relevant Ayurveda data found in the uploaded knowledge base.",
-          },
-        ]);
-        return;
-      }
-
-      // 3. Generate final answer using Gemini in the frontend
-      const prompt = `
-        You are an Ayurveda expert. ${outLangInstruction}
-        Use ONLY the CONTEXT below to answer.
-        
-        If CONTEXT does not support the answer, reply with:
-        - Hindi: "Iska Ayurveda data available nahi hai"
-        - English: "No relevant Ayurveda data found in the uploaded knowledge base."
-
-        CONTEXT:
-        ${context}
-
-        USER QUERY:
-        ${currentInput}
-
-        OUTPUT (max 6 bullets total, max ~120 words overall):
-        - Diet:
-        - Avoid:
-        - Herbs:
-        - Lifestyle:
-        Only write a line if that info is present in CONTEXT; otherwise omit that line.
-      `;
-
-      const response = await gemini.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-      });
+      const data = await askResponse.json();
+      if (!askResponse.ok) throw new Error(data.error || "Ask failed");
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "bot",
-        content: response.text || "Maaf kijiye, kuch error aa gaya.",
+        content: data.answer || "Maaf kijiye, kuch error aa gaya.",
       };
 
       setMessages((prev) => [...prev, botMessage]);
     } catch (error) {
       console.error("Error:", error);
+      const outLang = detectOutputLanguage(currentInput);
       setMessages((prev) => [
         ...prev,
-        { id: Date.now().toString(), role: "bot", content: "Something went wrong. Please check your connection." },
+        {
+          id: Date.now().toString(),
+          role: "bot",
+          content:
+            outLang === "hindi"
+              ? "Kuch problem aa gayi. Backend/DB connection check karein."
+              : "Something went wrong. Please check your backend/DB connection.",
+        },
       ]);
     } finally {
       setIsLoading(false);
@@ -465,64 +495,47 @@ export default function App() {
     setIsSeeding(true);
     const sampleData = [
       {
-        topic: "Acidity (Amlapitta)",
+        topic: "Parvo (Canine Parvovirus)",
         content:
-          "Pet me jalan, khatti dakar, aur seene me jalan iske mukhya lakshan hain. Diet: Thanda doodh, nariyal pani, aur saunf ka sevan karein. Avoid: Mirch-masala, chai, coffee, aur dahi raat ko na khayein. Herbs: Avipattikar Churna, Shankh Bhasma, aur Mulethi. Lifestyle: Khana khane ke baad turant na soyein, thoda tahlein.",
+          "Dog ko parvo (canine parvovirus) ho sakta hai. Symptoms: vomiting, diarrhea, lethargy. Treatments: IV fluids, antiemetic medicines, and isolation/supportive care. Pet: dog and disease: parvo.",
       },
       {
-        topic: "Digestion (Ajeerna)",
+        topic: "Skin Allergy (Cat)",
         content:
-          "Bhookh na lagna, pet bhari rehna, aur gas banna. Diet: Garm pani piyein, adrak aur namak khane se pehle lein. Avoid: Maida, bhari khana, aur thanda pani. Herbs: Hingvashtak Churna, Trikatu, aur Ajwain. Lifestyle: Vajrasana me baithein khane ke baad.",
+          "Cat me skin allergy ke lakshan. Symptoms: itching, rashes, redness. Treatments: early diagnosis, medication, supportive care. Pet: cat and disease: skin allergy.",
       },
       {
-        topic: "Constipation (Vibandha)",
+        topic: "Feline Flu",
         content:
-          "Pet saaf na hona, mal tyag me kathinai. Diet: Papaya, hari sabziyan, aur ghee ka sevan karein. Avoid: Junk food, dry snacks, aur raat ka bacha hua khana. Herbs: Triphala Churna, Isabgol, aur Castor oil. Lifestyle: Subah garm pani piyein aur yoga karein.",
+          "Cat ko feline flu ho sakta hai. Symptoms: sneezing, fever, nasal discharge. Treatments: hydration, supportive care. Pet: cat and disease: feline flu.",
       },
       {
-        topic: "Headache (Shirshool)",
+        topic: "Skin Allergy (Cat) - Repeat",
         content:
-          "Stress ya acidity ki wajah se sar dard. Diet: Ghee, badam, aur dhoodh. Avoid: Tez dhoop, shor, aur bhookha rehna. Herbs: Brahmi, Shankhpushpi, aur Jatamansi. Lifestyle: Pranayama aur meditation karein.",
+          "Cat me skin allergy ke symptoms: itching and rashes. Treatments: medication and supportive care. Pet: cat and disease: skin allergy.",
       },
       {
-        topic: "Skin Issues (Twak Roga)",
+        topic: "Parvo (Canine Parvovirus) - Repeat",
         content:
-          "Khujli, rashes, ya pimples. Diet: Neem ka pani, karela, aur haldi. Avoid: Jyada namak, khatta, aur non-veg. Herbs: Mahamanjisthadi Kwath, Neem, aur Khadir. Lifestyle: Saaf-safai ka dhyan rakhein aur cotton kapde pehnein.",
+          "Dog ko parvo ke symptoms: vomiting, diarrhea, lethargy. Treatments: IV fluids, antiemetic medicines, and isolation. Pet: dog and disease: parvo.",
       },
     ];
 
     try {
-      const gemini = getGeminiClient();
-      if (!gemini) {
-        alert(geminiMissingMessage());
-        return;
-      }
-
-      const dataWithEmbeddings = [];
       for (const item of sampleData) {
-        const textForEmbedding = `Topic: ${item.topic}\n\n${item.content}`;
-        const embeddingResult = await gemini.models.embedContent({
-          model: "gemini-embedding-2-preview",
-          contents: [textForEmbedding],
+        const response = await fetch(apiUrl("/api/graph/ingest-text"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: item.topic,
+            content: item.content,
+          }),
         });
-        dataWithEmbeddings.push({
-          topic: item.topic,
-          content: item.content,
-          embedding: embeddingResult.embeddings[0].values,
-        });
+        const resData = await response.json();
+        if (!response.ok) throw new Error(resData.error || "Seeding failed");
       }
-
-      const response = await fetch(apiUrl("/api/ingest"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: dataWithEmbeddings, knowledgeBase: selectedKnowledgeBase }),
-      });
-      const resData = await response.json();
-      if (!response.ok) {
-        throw new Error(resData.error || "Seeding failed");
-      }
-      alert(resData.message || "Database seeded successfully!");
-      fetchKnowledge();
+      alert("Graph seeded successfully!");
+      await checkGraphStatus();
     } catch (error) {
       console.error("Seeding error:", error);
       alert(`Seeding failed: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -665,6 +678,87 @@ export default function App() {
                 </button>
               </div>
 
+              <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3 text-stone-700 text-sm font-semibold">
+                    <Database className="w-5 h-5 text-blue-600" />
+                    Graph Configuration (Neo4j)
+                  </div>
+                  <div
+                    className={`px-2 py-1 rounded text-[10px] font-bold ${
+                      graphStatus === "connected"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : graphStatus === "checking"
+                        ? "bg-stone-100 text-stone-600"
+                        : "bg-red-100 text-red-700"
+                    }`}
+                  >
+                    GRAPH: {graphStatus === "connected" ? "ONLINE" : graphStatus === "checking" ? "CHECKING" : "OFFLINE"}
+                  </div>
+                </div>
+
+                <div className="mb-4">
+                  <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
+                    Source Knowledge Tables (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    value={graphSourceTables}
+                    onChange={(e) => setGraphSourceTables(e.target.value)}
+                    placeholder="animal_pet, ashtanga_hridaya, ayurveda_knowledge, knowledge_of_charak"
+                    className="w-full bg-white border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                  />
+                  <p className="mt-1.5 text-[11px] text-stone-500 leading-relaxed">
+                    Existing Supabase tables se direct graph build hoga. Naya table banane ki zarurat nahi.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={runGraphInit}
+                    disabled={isGraphInitLoading || isGraphBuildLoading || isGraphResetLoading}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isGraphInitLoading ? <Loader2 className="animate-spin w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5" />}
+                    Init Graph
+                  </button>
+                  <button
+                    onClick={runGraphBuildFromExisting}
+                    disabled={isGraphInitLoading || isGraphBuildLoading || isGraphResetLoading}
+                    className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isGraphBuildLoading ? <Loader2 className="animate-spin w-3.5 h-3.5" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    Build Graph
+                  </button>
+                  <button
+                    onClick={runGraphReset}
+                    disabled={isGraphInitLoading || isGraphBuildLoading || isGraphResetLoading}
+                    className="bg-rose-600 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-rose-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isGraphResetLoading ? <Loader2 className="animate-spin w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                    Reset Graph
+                  </button>
+                  <button
+                    onClick={runFullGraphSetup}
+                    disabled={isGraphInitLoading || isGraphBuildLoading || isGraphResetLoading}
+                    className="bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-50"
+                  >
+                    One-click Full Graph Setup
+                  </button>
+                </div>
+
+                {graphError ? (
+                  <p className="mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    {graphError}
+                  </p>
+                ) : null}
+                {graphBuildSummary ? (
+                  <p className="mt-3 text-xs text-blue-800 bg-white border border-blue-200 rounded-lg px-3 py-2">
+                    {graphBuildSummary}
+                  </p>
+                ) : null}
+              </div>
+
               {dbStatus === "error" && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 text-xs text-red-800">
                   <AlertCircle className="w-4 h-4 shrink-0" />
@@ -721,7 +815,7 @@ export default function App() {
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
+                      disabled={isBulkImporting || isIngesting || graphStatus !== "connected"}
                       onClick={() => bulkFileInputRef.current?.click()}
                       className="bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-50 flex items-center gap-2"
                     >
@@ -734,7 +828,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
+                      disabled={isBulkImporting || isIngesting || graphStatus !== "connected"}
                       onClick={async () => {
                         try {
                           const knowledgeBase = askKnowledgeBaseForUpload();
