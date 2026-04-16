@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import pg from "pg";
+import { GoogleGenAI } from "@google/genai";
 
 const { Pool } = pg;
 
@@ -24,6 +25,11 @@ export function getPool(): pg.Pool {
 
 let warmupPromise: Promise<void> | null = null;
 const DEFAULT_KNOWLEDGE_TABLE = "ayurveda_knowledge";
+const KNOWLEDGE_TABLES = [
+  "ayurveda_knowledge",
+  "knowledge_of_chakshita",
+  "ashtanga_hridayam_rag",
+] as const;
 
 function normalizeTableName(input: unknown): string {
   const raw = typeof input === "string" ? input.trim().toLowerCase() : "";
@@ -102,6 +108,178 @@ export function warmupDatabase(): Promise<void> {
     });
   }
   return warmupPromise;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// RAG PIPELINE UTILITIES
+// ─────────────────────────────────────────────────────────────────
+
+export const SIMILARITY_THRESHOLD = 0.55;
+
+export interface SearchResult {
+  topic: string;
+  content: string;
+  similarity: number;
+}
+
+/** Hybrid retrieval: vector cosine similarity + PostgreSQL full-text search, fused via RRF. */
+export async function hybridSearch(
+  client: pg.PoolClient,
+  tableName: string,
+  embedding: number[],
+  query: string,
+  limit = 5
+): Promise<SearchResult[]> {
+  const table = ensureSafeIdentifier(tableName);
+  const vectorStr = `[${embedding.join(",")}]`;
+
+  const vectorResult = await client.query<{
+    id: number;
+    topic: string;
+    content: string;
+    similarity: number;
+  }>(
+    `SELECT id, topic, content, 1 - (embedding <=> $1::vector) AS similarity
+     FROM ${table}
+     ORDER BY embedding <=> $1::vector
+     LIMIT $2;`,
+    [vectorStr, limit]
+  );
+
+  let ftsRows: { id: number; topic: string; content: string; fts_score: number }[] = [];
+  try {
+    const ftsResult = await client.query<{
+      id: number;
+      topic: string;
+      content: string;
+      fts_score: number;
+    }>(
+      `SELECT id, topic, content,
+              ts_rank(
+                to_tsvector('english', coalesce(content,'') || ' ' || coalesce(topic,'')),
+                plainto_tsquery('english', $1)
+              ) AS fts_score
+       FROM ${table}
+       WHERE to_tsvector('english', coalesce(content,'') || ' ' || coalesce(topic,''))
+             @@ plainto_tsquery('english', $1)
+       LIMIT $2;`,
+      [query, limit]
+    );
+    ftsRows = ftsResult.rows;
+  } catch {
+    // FTS may fail on degenerate queries — fall back to vector only
+  }
+
+  const seen = new Map<number, SearchResult>();
+  for (const row of vectorResult.rows) {
+    seen.set(row.id, { topic: row.topic, content: row.content, similarity: row.similarity });
+  }
+  for (const row of ftsRows) {
+    if (!seen.has(row.id)) {
+      seen.set(row.id, {
+        topic: row.topic,
+        content: row.content,
+        similarity: 0.5 + row.fts_score * 0.15,
+      });
+    } else {
+      const existing = seen.get(row.id)!;
+      existing.similarity = Math.min(1.0, existing.similarity + row.fts_score * 0.05);
+    }
+  }
+
+  return Array.from(seen.values())
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
+}
+
+/** Search across all knowledge tables and fuse results, de-duplicated by content prefix. */
+export async function multiTableHybridSearch(
+  client: pg.PoolClient,
+  embedding: number[],
+  query: string,
+  limit = 5
+): Promise<SearchResult[]> {
+  const allResults: SearchResult[] = [];
+
+  for (const table of KNOWLEDGE_TABLES) {
+    try {
+      const results = await hybridSearch(client, table, embedding, query, limit);
+      allResults.push(...results);
+    } catch {
+      // Skip tables that are empty or unavailable
+    }
+  }
+
+  // De-duplicate by content (first 120 chars as key), keep highest similarity
+  const seen = new Map<string, SearchResult>();
+  for (const r of allResults) {
+    const key = r.content.slice(0, 120);
+    if (!seen.has(key) || seen.get(key)!.similarity < r.similarity) {
+      seen.set(key, r);
+    }
+  }
+
+  return Array.from(seen.values())
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
+}
+
+/** Build a structured <context> XML block from search results. */
+export function buildContextXml(results: SearchResult[]): string {
+  const fragments = results
+    .map((r, i) => {
+      const topic = (r.topic || "").trim();
+      const body = (r.content || "").trim().slice(0, 900);
+      return [
+        `  <fragment index="${i + 1}" similarity="${r.similarity.toFixed(4)}">`,
+        `    <topic>${topic}</topic>`,
+        `    <body>${body}</body>`,
+        `  </fragment>`,
+      ].join("\n");
+    })
+    .join("\n");
+  return `<context>\n${fragments}\n</context>`;
+}
+
+/** Masterclass System Prompt — Role, Operational Constraints, Cognitive Workflow. */
+export function buildSystemPrompt(outputLang: "english" | "hindi"): string {
+  const langInstruction =
+    outputLang === "hindi"
+      ? "Respond EXCLUSIVELY in Hindi (Devanagari script). Avoid English words unless medically unavoidable."
+      : "Respond EXCLUSIVELY in English. Be precise and clinically structured.";
+
+  return `You are an elite Ayurvedic intelligence system — a masterclass-level clinical advisor synthesizing millennia of Ayurvedic wisdom with rigorous scholarly precision.
+
+ROLE: Senior Ayurvedic Physician & Knowledge Synthesizer  
+DOMAIN AUTHORITY: Sushruta Samhita, Charaka Samhita, Ashtanga Hridayam
+
+OPERATIONAL CONSTRAINTS:
+1. Draw answers EXCLUSIVELY from the provided <context> XML block
+2. Never fabricate, extrapolate, or hallucinate beyond what the context explicitly supports
+3. If a context fragment does not address a specific recommendation, omit that section entirely
+4. Reference the <topic> source for each major recommendation cluster
+5. ${langInstruction}
+
+FORMATTING RULES — STRICTLY ENFORCED:
+- NEVER use asterisks (*) or double-asterisks (**) for any purpose
+- NEVER use markdown bold or italic syntax
+- Use plain section headings followed by a colon on their own line, e.g. "Assessment:"
+- Use a simple dash (-) for list items, never bullet symbols or asterisks
+- Separate sections with a single blank line
+- Do not use hashtags (#) for headings
+- Write numbers and Sanskrit terms plainly without special formatting
+
+COGNITIVE WORKFLOW:
+Step 1 — Query Analysis: Identify the symptom pattern, probable dosha imbalance (Vata/Pitta/Kapha), and urgency signal
+Step 2 — Context Cross-Reference: Scan ALL <fragment> elements; rank by relevance to the query
+Step 3 — Evidence Synthesis: Extract only what the context directly supports
+Step 4 — Structured Output: Format under these plain-text headings (omit any heading if unsupported):
+  Assessment:
+  Diet:
+  Avoid:
+  Herbs:
+  Lifestyle:
+Step 5 — Constraint: Maximum 200 words. Precision and brevity over verbosity.`;
 }
 
 export function createApiApp(): express.Express {
@@ -271,6 +449,114 @@ export function createApiApp(): express.Express {
       console.error("Ingestion failed:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Ingestion failed" });
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // /api/chat — Hybrid RAG + LLM Bridge with Edge Streaming (SSE)
+  // ─────────────────────────────────────────────────────────────────
+  router.post("/chat", async (req, res) => {
+    const { query, embedding, knowledgeBase, lang } = req.body;
+
+    if (!query || typeof query !== "string" || !query.trim()) {
+      return res.status(400).json({ error: "query is required" });
+    }
+    if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+      return res.status(400).json({ error: "embedding array is required" });
+    }
+
+    const geminiKey = process.env.GEMINI_API_KEY?.trim();
+    if (!geminiKey) {
+      return res.status(503).json({ error: "GEMINI_API_KEY not configured on server." });
+    }
+
+    let tableName = DEFAULT_KNOWLEDGE_TABLE;
+    try {
+      tableName = normalizeTableName(knowledgeBase);
+    } catch {
+      return res.status(400).json({ error: "Invalid knowledgeBase name" });
+    }
+
+    // ── SSE headers ──
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    res.socket?.setNoDelay(true);
+
+    const send = (payload: object) => {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      (res as unknown as { flush?: () => void }).flush?.();
+    };
+
+    let results: SearchResult[] = [];
+    try {
+      const client = await getPool().connect();
+      try {
+        results = await multiTableHybridSearch(client, embedding, query.trim());
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      send({ type: "error", message: err instanceof Error ? err.message : "Search failed" });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+
+    const maxSimilarity = results.length > 0 ? results[0].similarity : 0;
+
+    // ── Safety Layer: Similarity Threshold ──
+    if (maxSimilarity < SIMILARITY_THRESHOLD) {
+      send({ type: "null_state", similarity: maxSimilarity });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+
+    // ── Context Injection ──
+    const contextXml = buildContextXml(results);
+
+    // ── Language Detection — explicit override or auto-detect ──
+    const validLangs = ["hindi", "english"] as const;
+    const forcedLang = typeof lang === "string" && (validLangs as readonly string[]).includes(lang)
+      ? (lang as "hindi" | "english")
+      : null;
+    const devanagariCount = (query.match(/[\u0900-\u097F]/g) ?? []).length;
+    const latinCount = (query.match(/[A-Za-z]/g) ?? []).length;
+    const outputLang: "hindi" | "english" = forcedLang ?? (devanagariCount > latinCount ? "hindi" : "english");
+
+    // ── LLM Bridge ──
+    const systemPrompt = buildSystemPrompt(outputLang);
+    const fullPrompt = `${systemPrompt}\n\n${contextXml}\n\nUSER QUERY:\n${query.trim()}`;
+
+    try {
+      const gemini = new GoogleGenAI({ apiKey: geminiKey });
+      const stream = await gemini.models.generateContentStream({
+        model: "gemini-2.5-flash",
+        contents: fullPrompt,
+      });
+
+      send({ type: "meta", similarity: maxSimilarity, fragments: results.length });
+
+      for await (const chunk of stream) {
+        const text = chunk.text;
+        if (text) {
+          send({ type: "text", text });
+        }
+      }
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      // Surface 429 rate-limit with retry delay hint
+      const retryMatch = raw.match(/retry[^\d]*(\d+(?:\.\d+)?)\s*s/i);
+      const msg = raw.includes("429") || raw.includes("RESOURCE_EXHAUSTED")
+        ? `Rate limit reached (free-tier quota). ${retryMatch ? `Retry in ~${Math.ceil(Number(retryMatch[1]))}s.` : "Please wait a moment and try again."}  \n\n_Tip: Switch to a paid Gemini API plan for no quota limits._`
+        : `LLM error: ${raw.slice(0, 300)}`;
+      send({ type: "error", message: msg });
+    }
+
+    res.write("data: [DONE]\n\n");
+    res.end();
   });
 
   app.use("/api", router);

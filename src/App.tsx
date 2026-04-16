@@ -1,9 +1,20 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Send, Bot, User, Sparkles, Leaf, Info, AlertCircle, Loader2, Database, Upload } from "lucide-react";
+﻿import React, { useState, useRef, useEffect } from "react";
+import { Send, Sparkles, Leaf, AlertCircle, Loader2, Database, Upload, ChevronDown, X, ArrowLeft } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 import { GoogleGenAI } from "@google/genai";
 import { parseKnowledgeCsv, type KnowledgeRow } from "./parseKnowledgeCsv";
+
+const SUPABASE_IMG = "https://yidjcuymlbmdxbjcjjbd.supabase.co/storage/v1/object/public/generated-images/VaidyaRAG";
+const IMG = {
+  chatBg:          `${SUPABASE_IMG}/chat-bg-texture.jpg`,
+  sidebarHerbs:    `${SUPABASE_IMG}/sidebar-herbs.jpg`,
+  avatarVaidya:    `${SUPABASE_IMG}/avatar-vaidya.png`,
+  manuscriptStrip: `${SUPABASE_IMG}/manuscript-strip.jpg`,
+  welcomeMandala:  `${SUPABASE_IMG}/welcome-mandala.png`,
+  nullLeaf:        `${SUPABASE_IMG}/null-state-leaf.png`,
+  corpusTexture:   `${SUPABASE_IMG}/corpus-texture.jpg`,
+};
 
 const BULK_INGEST_CHUNK = 12;
 const DEFAULT_KNOWLEDGE_BASE = "ayurveda_knowledge";
@@ -45,7 +56,7 @@ function getGeminiClient(): GoogleGenAI | null {
 function geminiMissingMessage() {
   return (
     "GEMINI_API_KEY set nahi hai.\n\n" +
-    "Vercel: Project → Settings → Environment Variables → GEMINI_API_KEY add karein, " +
+    "Vercel: Project -> Settings ->’ Environment Variables -> GEMINI_API_KEY add karein, " +
     "Production + Preview dono par lagayein, phir Redeploy."
   );
 }
@@ -54,7 +65,13 @@ interface Message {
   id: string;
   role: "user" | "bot";
   content: string;
+  isNullState?: boolean;
+  isStreaming?: boolean;
+  similarity?: number;
 }
+
+const WELCOME_EN = "Namaste. I am your Ayurvedic intelligence system, drawing from the _Sushruta Samhita_, _Charaka Samhita_, and classical texts.\n\nDescribe your condition, symptom, or query — in English or Hindi.";
+const WELCOME_HI = "नमस्ते। मैं आपका आयुर्वेदिक बुद्धिमत्ता प्रणाली हूँ — _सुश्रुत संहिता_, _चरक संहिता_, और अन्य शास्त्रीय ग्रंथों पर आधारित।\n\nअपनी स्वास्थ्य समस्या या प्रश्न हिंदी या अंग्रेज़ी में बताएं।";
 
 export default function App() {
   const hasGeminiKey =
@@ -63,11 +80,7 @@ export default function App() {
 
   const [isAdmin, setIsAdmin] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      role: "bot",
-      content: "Namaste! Main aapka Ayurveda assistant hoon. Aapko kya health issue hai? (e.g., 'Pet me jalan', 'Digestion issue', 'Acidity')",
-    },
+    { id: "init", role: "bot", content: WELCOME_EN },
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -88,8 +101,22 @@ export default function App() {
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkProgress, setBulkProgress] = useState("");
   const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(DEFAULT_KNOWLEDGE_BASE);
+  const [outputLang, setOutputLang] = useState<"auto" | "hindi" | "english">("auto");
+
+  // Update welcome message instantly when lang toggle changes
+  useEffect(() => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === "init"
+          ? { ...m, content: outputLang === "hindi" ? WELCOME_HI : WELCOME_EN }
+          : m
+      )
+    );
+  }, [outputLang]);
+
   const bulkFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     // Admin unlock can come from admin page or direct URL token.
@@ -219,7 +246,7 @@ export default function App() {
     for (let i = 0; i < withEmb.length; i += BULK_INGEST_CHUNK) {
       const chunk = withEmb.slice(i, i + BULK_INGEST_CHUNK);
       const end = Math.min(i + chunk.length, withEmb.length);
-      setBulkProgress(`Saving ${i + 1}–${end} / ${totalLabel}…`);
+      setBulkProgress(`Saving ${i + 1} - ${end} / ${totalLabel}...`);
       addDebug(`Ingest batch ${i / BULK_INGEST_CHUNK + 1}`);
       const response = await fetch(apiUrl("/api/ingest"), {
         method: "POST",
@@ -248,7 +275,7 @@ export default function App() {
     }
 
     const ok = confirm(
-      `${rows.length} alag topics import honge (alag-alag DB rows). Gemini se embedding ${rows.length} baar banegi — thoda time lagega. Continue?`
+      `${rows.length} alag topics import honge (alag-alag DB rows). Gemini se embedding ${rows.length} baar banegi â€” thoda time lagega. Continue?`
     );
     if (!ok) return;
 
@@ -265,7 +292,7 @@ export default function App() {
       const withEmb: { topic: string; content: string; embedding: number[] }[] = [];
       for (let i = 0; i < rows.length; i++) {
         const { topic, content } = rows[i];
-        setBulkProgress(`Embedding ${i + 1} / ${rows.length}: ${topic.slice(0, 48)}…`);
+        setBulkProgress(`Embedding ${i + 1} / ${rows.length}: ${topic.slice(0, 48)}â€¦`);
         addDebug(`Bulk embed ${i + 1}/${rows.length}`);
         const textForEmbedding = `Topic: ${topic}\n\n${content}`;
         const embeddingResult = await gemini.models.embedContent({
@@ -275,7 +302,7 @@ export default function App() {
         withEmb.push({
           topic,
           content,
-          embedding: embeddingResult.embeddings[0].values,
+          embedding: embeddingResult.embeddings![0].values!,
         });
         await new Promise((r) => setTimeout(r, 100));
       }
@@ -316,7 +343,7 @@ export default function App() {
         model: "gemini-embedding-2-preview",
         contents: [textForEmbedding],
       });
-      const embedding = embeddingResult.embeddings[0].values;
+      const embedding = embeddingResult.embeddings![0].values!;
       addDebug(`Embedding generated (Size: ${embedding.length})`);
 
       addDebug("Sending to backend...");
@@ -352,109 +379,125 @@ export default function App() {
     e?.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: input,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    const currentInput = input;
+    const currentInput = input.trim();
+    const userMsg: Message = { id: Date.now().toString(), role: "user", content: currentInput };
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
 
-    try {
-      const gemini = getGeminiClient();
-      if (!gemini) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "bot",
-            content:
-              "**GEMINI_API_KEY** live site par set nahi hai. Vercel → Environment Variables → add karein aur redeploy karein.",
-          },
-        ]);
-        return;
-      }
+    const gemini = getGeminiClient();
+    if (!gemini) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: "bot",
+          content: "**GEMINI_API_KEY** is not configured. Please add it in Vercel â†’ Environment Variables, then redeploy.",
+        },
+      ]);
+      setIsLoading(false);
+      return;
+    }
 
-      // 1. Generate embedding for the query in the frontend
-      const embeddingResult = await gemini.models.embedContent({
+    try {
+      // 1. Generate embedding (client-side)
+      const embResult = await gemini.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: [currentInput],
       });
-      const queryEmbedding = embeddingResult.embeddings[0].values;
+      const embedding = embResult.embeddings![0].values!;
 
-      // 2. Call backend to search for context
-      const searchResponse = await fetch(apiUrl("/api/search"), {
+      // 2. Call /api/chat â€” SSE streaming
+      const response = await fetch(apiUrl("/api/chat"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embedding: queryEmbedding, knowledgeBase: selectedKnowledgeBase }),
+        body: JSON.stringify({ query: currentInput, embedding, knowledgeBase: selectedKnowledgeBase, lang: outputLang !== "auto" ? outputLang : undefined }),
       });
 
-      const { context } = await searchResponse.json();
-      
-      const outLang = detectOutputLanguage(currentInput);
-      const outLangInstruction =
-        outLang === "hindi"
-          ? "Answer ONLY in Hindi (Devanagari). Do not use English words unless unavoidable."
-          : "Answer ONLY in English. Do not use Hindi words.";
-
-      if (!context) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "bot",
-            content:
-              outLang === "hindi"
-                ? "Iska Ayurveda data available nahi hai"
-                : "No relevant Ayurveda data found in the uploaded knowledge base.",
-          },
-        ]);
-        return;
+      if (!response.ok || !response.body) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || "Chat request failed");
       }
 
-      // 3. Generate final answer using Gemini in the frontend
-      const prompt = `
-        You are an Ayurveda expert. ${outLangInstruction}
-        Use ONLY the CONTEXT below to answer.
-        
-        If CONTEXT does not support the answer, reply with:
-        - Hindi: "Iska Ayurveda data available nahi hai"
-        - English: "No relevant Ayurveda data found in the uploaded knowledge base."
+      const botId = (Date.now() + 1).toString();
+      setMessages((prev) => [...prev, { id: botId, role: "bot", content: "", isStreaming: true }]);
 
-        CONTEXT:
-        ${context}
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
 
-        USER QUERY:
-        ${currentInput}
+      while (!done) {
+        const { done: readerDone, value } = await reader.read();
+        if (readerDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
 
-        OUTPUT (max 6 bullets total, max ~120 words overall):
-        - Diet:
-        - Avoid:
-        - Herbs:
-        - Lifestyle:
-        Only write a line if that info is present in CONTEXT; otherwise omit that line.
-      `;
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (raw === "[DONE]") { done = true; break; }
 
-      const response = await gemini.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-      });
+          // Parse JSON separately so a parse failure doesn't swallow event handler errors
+          let payload: { type: string; text?: string; similarity?: number; message?: string };
+          try {
+            payload = JSON.parse(raw);
+          } catch {
+            continue; // skip malformed chunk, keep reading
+          }
 
-      const botMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "bot",
-        content: response.text || "Maaf kijiye, kuch error aa gaya.",
-      };
+          if (payload.type === "null_state") {
+            const pct = Math.round((payload.similarity ?? 0) * 100);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === botId
+                  ? {
+                      ...m,
+                      isNullState: true,
+                      isStreaming: false,
+                      similarity: payload.similarity,
+                      content: `**No knowledge match found** — relevance score: ${pct}% (minimum: 75%)
 
-      setMessages((prev) => [...prev, botMessage]);
+The corpus doesn't have a strong enough match for this query. Try rephrasing, or ingest relevant data first from the Knowledge panel.`,
+                    }
+                  : m
+              )
+            );
+            done = true;
+          } else if (payload.type === "text" && payload.text) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === botId ? { ...m, content: m.content + payload.text } : m))
+            );
+          } else if (payload.type === "error") {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === botId
+                  ? { ...m, isStreaming: false, content: `**Error:** ${payload.message ?? "Unknown server error"}` }
+                  : m
+              )
+            );
+            done = true;
+          }
+        }
+      }
+
+      // Mark streaming complete; show fallback if content is still empty
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === botId
+            ? { ...m, isStreaming: false, content: m.content || "_No response received. Please check your knowledge base has data ingested, then try again._" }
+            : m
+        )
+      );
     } catch (error) {
-      console.error("Error:", error);
       setMessages((prev) => [
         ...prev,
-        { id: Date.now().toString(), role: "bot", content: "Something went wrong. Please check your connection." },
+        {
+          id: Date.now().toString(),
+          role: "bot",
+          content: `Something went wrong: ${error instanceof Error ? error.message : "Unknown error"}`,
+        },
       ]);
     } finally {
       setIsLoading(false);
@@ -508,7 +551,7 @@ export default function App() {
         dataWithEmbeddings.push({
           topic: item.topic,
           content: item.content,
-          embedding: embeddingResult.embeddings[0].values,
+          embedding: embeddingResult.embeddings![0].values!,
         });
       }
 
@@ -532,383 +575,391 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 text-stone-900 font-sans flex flex-col">
-      {!hasGeminiKey ? (
-        <div className="bg-amber-100 border-b border-amber-300 px-4 py-3 text-center text-sm text-amber-950">
-          <strong>GEMINI_API_KEY missing.</strong> Vercel → Project → Settings → Environment Variables → add{" "}
-          <code className="bg-white/70 px-1 rounded">GEMINI_API_KEY</code> for Production (and Preview), then{" "}
-          <strong>Redeploy</strong>. Until then chat / embeddings kaam nahi karenge.
-        </div>
-      ) : null}
-      {/* Header */}
-      <header className="bg-white border-b border-stone-200 py-4 px-6 sticky top-0 z-10 shadow-sm">
-        <div className="max-w-4xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="bg-emerald-600 p-2 rounded-lg">
-              <Leaf className="text-white w-6 h-6" />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight text-emerald-900">Ayurveda Nutrition System</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            {isAdmin && (
-              <>
-                <div
-                  className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                    dbStatus === "connected"
-                      ? dbDetails?.vectorExtension && dbDetails?.tableExists
-                        ? "bg-emerald-100 text-emerald-700"
-                        : "bg-amber-100 text-amber-700"
-                      : dbStatus === "error"
-                      ? "bg-red-100 text-red-700"
-                      : "bg-stone-100 text-stone-500"
-                  }`}
-                >
-                  <div
-                    className={`w-1.5 h-1.5 rounded-full ${
-                      dbStatus === "connected"
-                        ? dbDetails?.vectorExtension && dbDetails?.tableExists
-                          ? "bg-emerald-500 animate-pulse"
-                          : "bg-amber-500"
-                        : dbStatus === "error"
-                        ? "bg-red-500"
-                        : "bg-stone-400"
-                    }`}
-                  />
-                  {dbStatus === "connected"
-                    ? dbDetails?.vectorExtension && dbDetails?.tableExists
-                      ? "DB Online"
-                      : "Setup Req."
-                    : dbStatus === "error"
-                    ? "DB Offline"
-                    : "Checking DB"}
-                </div>
-                <button
-                  onClick={() => setShowAdmin(!showAdmin)}
-                  className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors"
-                >
-                  <Database className="w-3 h-3" />
-                  {showAdmin ? "Close Manager" : "Manage Knowledge"}
-                </button>
-                <button
-                  onClick={seedDatabase}
-                  disabled={isSeeding}
-                  className="flex items-center gap-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-600 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50"
-                >
-                  <Sparkles className="w-3 h-3" />
-                  {isSeeding ? "Seeding..." : "Seed Knowledge Base"}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      </header>
+    <div className="chat-shell">
+      {/* ── BACKGROUND LAYERS ── */}
+      {/* Photographic texture base */}
+      <div
+        className="chat-bg-photo"
+        style={{ backgroundImage: `url('${IMG.chatBg}')` }}
+      />
+      {/* Sage-green tint overlay to unify */}
+      <div className="chat-bg-tint" />
+      {/* Grain film overlay */}
+      <div className="chat-bg-grain" />
 
-      {/* Admin Panel */}
-      <AnimatePresence>
-        {showAdmin && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="bg-white border-b border-stone-200 overflow-hidden"
-          >
-            <div className="max-w-4xl mx-auto p-6">
-              <h2 className="text-sm font-semibold text-stone-600 mb-4 flex items-center gap-2 uppercase tracking-wider">
-                <Database className="w-4 h-4" /> Add Knowledge to RAG Pipeline
-              </h2>
-              
-              {/* Detailed Status & Initialization */}
-              <div className="mb-6 p-4 bg-stone-50 border border-stone-200 rounded-xl">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3 text-stone-700 text-sm font-semibold">
-                    <Database className="w-5 h-5 text-emerald-600" />
-                    Database Configuration
-                  </div>
-                  <div className="flex gap-2">
-                    <div className={`px-2 py-1 rounded text-[10px] font-bold ${dbDetails?.vectorExtension ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
-                      VECTOR EXT: {dbDetails?.vectorExtension ? "ON" : "OFF"}
-                    </div>
-                    <div className={`px-2 py-1 rounded text-[10px] font-bold ${dbDetails?.tableExists ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
-                      TABLE: {dbDetails?.tableExists ? "READY" : "MISSING"}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mb-4">
-                  <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
-                    Active Knowledge Base (Table Name)
-                  </label>
-                  <input
-                    type="text"
-                    value={selectedKnowledgeBase}
-                    onChange={(e) => setSelectedKnowledgeBase(e.target.value.trim().toLowerCase())}
-                    placeholder="e.g. ayurveda_knowledge or charakshita_knowledge"
-                    className="w-full bg-white border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
-                  <p className="mt-1.5 text-[11px] text-stone-500 leading-relaxed">
-                    Chat search, list, single ingest, and CSV import is table naam par chalega.
-                  </p>
-                </div>
-                
-                <p className="text-xs text-stone-500 mb-4 leading-relaxed">
-                  If you see "Dimension Mismatch" errors (expected 768, got 3072), click the button below to recreate the table with correct settings. 
-                  <span className="text-red-500 font-medium ml-1">Warning: This will delete all saved knowledge!</span>
-                </p>
-
-                <button
-                  onClick={initializeDb}
-                  disabled={isInitializing}
-                  className="bg-amber-600 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-amber-700 transition-colors disabled:opacity-50 flex items-center gap-2 shadow-sm"
-                >
-                  {isInitializing ? <Loader2 className="animate-spin w-3 h-3" /> : <Sparkles className="w-3 h-3" />}
-                  {dbDetails?.tableExists ? "Reset & Fix Database (3072 Dimensions)" : "Initialize Database"}
-                </button>
+      {/* ── SIDEBAR PANEL ── */}
+      <aside className="chat-sidebar">
+        <div className="chat-sidebar-photo" style={{ backgroundImage: `url('${IMG.sidebarHerbs}')` }} />
+        <div className="chat-sidebar-overlay" />
+        <div className="chat-sidebar-content">
+          {/* Logo mark */}
+          <div className="chat-sidebar-logo">
+            <button
+              className="chat-back-btn"
+              onClick={() => { window.history.pushState({}, '', '/'); window.dispatchEvent(new PopStateEvent('popstate')); }}
+              aria-label="Back to home"
+            >
+              <ArrowLeft size={13} />
+              <span>Home</span>
+            </button>
+            <div className="chat-sidebar-logo-row">
+              <div className="chat-sidebar-leaf-wrap">
+                <Leaf size={18} className="chat-sidebar-leaf" />
               </div>
+              <div>
+                <div className="chat-sidebar-brand">VedaAI</div>
+                <div className="chat-sidebar-tagline">Āyurvedic Intelligence</div>
+              </div>
+            </div>
+          </div>
 
-              {dbStatus === "error" && (
-                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 text-xs text-red-800">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
+          {/* corpus pills */}
+          <div className="chat-sidebar-section">
+            <div className="chat-sidebar-section-label">Knowledge Corpus</div>
+            {["Sushruta Samhitā", "Charaka Samhitā", "Ashtānga Hridayam"].map((t, i) => (
+              <div key={i} className="chat-sidebar-corpus-pill">
+                <span className="chat-sidebar-corpus-dot" />
+                {t}
+              </div>
+            ))}
+          </div>
+
+          <div className="chat-sidebar-divider" />
+
+          {/* System status */}
+          <div className="chat-sidebar-section">
+            <div className="chat-sidebar-section-label">System</div>
+            <div className="chat-sidebar-stat">
+              <span className="chat-sidebar-stat-key">Model</span>
+              <span className="chat-sidebar-stat-val">Gemini 2.5 Flash</span>
+            </div>
+            <div className="chat-sidebar-stat">
+              <span className="chat-sidebar-stat-key">Retrieval</span>
+              <span className="chat-sidebar-stat-val">Hybrid RAG</span>
+            </div>
+            <div className="chat-sidebar-stat">
+              <span className="chat-sidebar-stat-key">Vector DB</span>
+              <span className="chat-sidebar-stat-val">pgvector</span>
+            </div>
+            <div className="chat-sidebar-stat">
+              <span className="chat-sidebar-stat-key">DB</span>
+              <span className={`chat-sidebar-stat-val ${dbStatus === "connected" ? "chat-stat-online" : "chat-stat-offline"}`}>
+                {dbStatus === "checking" ? "checking…" : dbStatus === "connected" ? "● online" : "● offline"}
+              </span>
+            </div>
+          </div>
+
+          <div className="chat-sidebar-divider" />
+
+          {/* Lang toggle */}
+          <div className="chat-sidebar-section">
+            <div className="chat-sidebar-section-label">Response Language</div>
+            <div className="chat-lang-row">
+              {(["auto", "english", "hindi"] as const).map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setOutputLang(l)}
+                  className={`chat-lang-btn${outputLang === l ? " chat-lang-btn-active" : ""}`}
+                >
+                  {l === "auto" ? "Auto" : l === "english" ? "EN" : "हि"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Admin toggle */}
+          {isAdmin && (
+            <>
+              <div className="chat-sidebar-divider" />
+              <div className="chat-sidebar-section">
+                <button
+                  onClick={() => setShowAdmin((v) => !v)}
+                  className={`chat-admin-btn${showAdmin ? " chat-admin-btn-active" : ""}`}
+                >
+                  <Database size={12} />
+                  Knowledge Pipeline
+                  <ChevronDown size={11} style={{ marginLeft: "auto", transform: showAdmin ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
+                </button>
+                {!hasGeminiKey && (
+                  <div className="chat-api-warn">
+                    <AlertCircle size={10} /> GEMINI_API_KEY missing
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          <div style={{ flex: 1 }} />
+
+          {/* Footer */}
+          <div className="chat-sidebar-footer">
+            <div className="chat-sidebar-footer-text">Threshold · 0.55 · FTS fusion</div>
+          </div>
+        </div>
+      </aside>
+
+      {/* ── MAIN COLUMN ── */}
+      <div className="chat-main">
+
+        {/* ── TOP MANUSCRIPT STRIP ── */}
+        <div className="chat-manuscript-strip" style={{ backgroundImage: `url('${IMG.manuscriptStrip}')` }}>
+          <div className="chat-manuscript-strip-mask" />
+          <div className="chat-manuscript-strip-text">
+            <span>सुश्रुत संहिता</span>
+            <span className="chat-strip-dot">·</span>
+            <span>चरक संहिता</span>
+            <span className="chat-strip-dot">·</span>
+            <span>अष्टांग हृदयम्</span>
+          </div>
+        </div>
+
+        {/* ── ADMIN PANEL ── */}
+        <AnimatePresence>
+          {showAdmin && isAdmin && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.28 }}
+              className="chat-admin-panel overflow-hidden"
+            >
+              <div className="chat-admin-inner">
+                <div className="chat-admin-header">
+                  <Database size={11} />
+                  <span>Knowledge Pipeline — {selectedKnowledgeBase}</span>
+                  <button onClick={() => setShowAdmin(false)} className="chat-admin-close"><X size={13} /></button>
+                </div>
+
+                {/* DB config */}
+                <div className="chat-admin-card" style={{ backgroundImage: `url('${IMG.corpusTexture}')` }}>
+                  <div className="chat-admin-card-overlay" />
+                  <div className="chat-admin-card-body">
+                    <div className="chat-admin-row-top">
+                      <span className="chat-admin-label">Active Table</span>
+                      <div className="flex gap-2">
+                        {[
+                          { label: `pgvector: ${dbDetails?.vectorExtension ? "on" : "off"}`, ok: !!dbDetails?.vectorExtension },
+                          { label: `table: ${dbDetails?.tableExists ? "ready" : "missing"}`, ok: !!dbDetails?.tableExists },
+                        ].map(({ label, ok }) => (
+                          <span key={label} className={`chat-admin-badge ${ok ? "chat-badge-ok" : "chat-badge-err"}`}>{label}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={selectedKnowledgeBase}
+                      onChange={(e) => setSelectedKnowledgeBase(e.target.value.trim().toLowerCase())}
+                      placeholder="e.g. ayurveda_knowledge"
+                      className="chat-admin-input"
+                    />
+                    {dbStatus === "error" && <p className="chat-admin-err">{dbError}</p>}
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      <button onClick={initializeDb} disabled={isInitializing} className="chat-admin-action-btn chat-btn-gold">
+                        {isInitializing ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                        {dbDetails?.tableExists ? "reset db" : "init db"}
+                      </button>
+                      <button onClick={seedDatabase} disabled={isSeeding} className="chat-admin-action-btn chat-btn-green">
+                        {isSeeding ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                        seed sample data
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Ingest fields */}
+                <div className="space-y-3 mt-4">
                   <div>
-                    <strong>Database Connection Error:</strong> {dbError}
-                    <p className="mt-1">Please check your Supabase credentials and ensure the 'vector' extension is enabled.</p>
+                    <label className="chat-admin-field-label">Topic</label>
+                    <input type="text" value={knowledgeTopic} onChange={(e) => setKnowledgeTopic(e.target.value)} placeholder="e.g. Diabetes (Madhumeha)" className="chat-admin-input" />
                   </div>
-                </div>
-              )}
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[11px] font-bold text-stone-500 uppercase tracking-wider mb-1.5">
-                    Topic (alag row ke liye)
-                  </label>
-                  <input
-                    type="text"
-                    value={knowledgeTopic}
-                    onChange={(e) => setKnowledgeTopic(e.target.value)}
-                    placeholder="e.g. Diabetes (Madhumeha), Neem herb, General intro — har topic ke liye alag save karein"
-                    className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
-                  <p className="mt-1.5 text-[11px] text-stone-500 leading-relaxed">
-                    Ek hi topic ke liye yahan use karein. Bahut saari rows ke liye neeche CSV import use karein.
-                  </p>
-                </div>
-                <div className="p-4 bg-emerald-50/80 border border-emerald-200 rounded-xl space-y-3">
-                  <h3 className="text-xs font-bold text-emerald-900 uppercase tracking-wider flex items-center gap-2">
-                    <Upload className="w-4 h-4" /> Bulk import (CSV — topic + text columns)
-                  </h3>
-                  <p className="text-[11px] text-emerald-900/80 leading-relaxed">
-                    Header mein <code className="bg-white/80 px-1 rounded">topic</code> aur{" "}
-                    <code className="bg-white/80 px-1 rounded">text</code> hona chahiye (jaise{" "}
-                    <code className="bg-white/80 px-1 rounded">sushruta_sam.csv</code>). Har row alag DB entry banegi.
-                  </p>
-                  <input
-                    ref={bulkFileInputRef}
-                    type="file"
-                    accept=".csv,text/csv"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      const inputEl = e.target;
-                      if (!file) return;
-                      const knowledgeBase = askKnowledgeBaseForUpload();
-                      if (!knowledgeBase) {
-                        inputEl.value = "";
-                        return;
-                      }
-                      const text = await file.text();
-                      inputEl.value = "";
-                      await runBulkKnowledgeImport(text, file.name, knowledgeBase);
-                    }}
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
-                      onClick={() => bulkFileInputRef.current?.click()}
-                      className="bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-800 transition-colors disabled:opacity-50 flex items-center gap-2"
-                    >
-                      {isBulkImporting ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Upload className="w-3.5 h-3.5" />
-                      )}
-                      Choose CSV file
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
-                      onClick={async () => {
-                        try {
-                          const knowledgeBase = askKnowledgeBaseForUpload();
-                          if (!knowledgeBase) return;
-                          const res = await fetch("/sushruta_sam.csv");
-                          if (!res.ok) {
-                            alert("sushruta_sam.csv load nahi hua — public/ folder check karein.");
-                            return;
-                          }
-                          const text = await res.text();
-                          await runBulkKnowledgeImport(text, "sushruta_sam.csv (bundled)", knowledgeBase);
-                        } catch {
-                          alert("Sample CSV fetch failed.");
-                        }
-                      }}
-                      className="bg-white border border-emerald-300 text-emerald-900 px-4 py-2 rounded-xl text-xs font-semibold hover:bg-emerald-50 transition-colors disabled:opacity-50"
-                    >
-                      Import bundled Sushruta CSV
-                    </button>
+                  <div>
+                    <label className="chat-admin-field-label">Content</label>
+                    <textarea value={customKnowledge} onChange={(e) => setCustomKnowledge(e.target.value)} placeholder="Paste Ayurvedic knowledge text for this topic..." rows={4} className="chat-admin-input chat-admin-textarea" />
                   </div>
-                  {bulkProgress ? (
-                    <p className="text-[11px] font-mono text-emerald-800 bg-white/70 rounded-lg px-3 py-2 border border-emerald-100">
-                      {bulkProgress}
+
+                  {/* Bulk CSV */}
+                  <div className="chat-admin-csv-box">
+                    <p className="chat-admin-label" style={{ marginBottom: "10px" }}>
+                      Bulk CSV — requires <code className="chat-admin-code">topic</code> + <code className="chat-admin-code">text</code> columns
                     </p>
-                  ) : null}
-                </div>
-                <textarea
-                  value={customKnowledge}
-                  onChange={(e) => setCustomKnowledge(e.target.value)}
-                  placeholder="Is topic ka detail yahan — sirf yahi hissa is row ki 'content' banega..."
-                  className="w-full h-32 bg-stone-50 border border-stone-200 rounded-xl p-4 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                />
-                <div className="flex justify-end">
-                  <button
-                    onClick={handleIngestCustom}
-                    disabled={!customKnowledge.trim() || isIngesting || isBulkImporting}
-                    className="bg-emerald-600 text-white px-6 py-2 rounded-xl text-sm font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {isIngesting ? <Loader2 className="animate-spin w-4 h-4" /> : <Database className="w-4 h-4" />}
-                    Add to Knowledge Base
-                  </button>
-                </div>
+                    <input ref={bulkFileInputRef} type="file" accept=".csv,text/csv" className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0]; const el = e.target;
+                        if (!file) return;
+                        const kb = askKnowledgeBaseForUpload();
+                        if (!kb) { el.value = ""; return; }
+                        const text = await file.text(); el.value = "";
+                        await runBulkKnowledgeImport(text, file.name, kb);
+                      }}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" disabled={isBulkImporting || isIngesting || dbStatus !== "connected"} onClick={() => bulkFileInputRef.current?.click()} className="chat-admin-action-btn chat-btn-green">
+                        {isBulkImporting ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                        choose csv
+                      </button>
+                      <button type="button" disabled={isBulkImporting || isIngesting || dbStatus !== "connected"}
+                        onClick={async () => { try { const kb = askKnowledgeBaseForUpload(); if (!kb) return; const r = await fetch("/sushruta_sam.csv"); if (!r.ok) { alert("sushruta_sam.csv not found in public/"); return; } const text = await r.text(); await runBulkKnowledgeImport(text, "sushruta_sam.csv", kb); } catch { alert("Fetch failed."); } }}
+                        className="chat-admin-action-btn chat-btn-gold">
+                        import sushruta csv
+                      </button>
+                    </div>
+                    {bulkProgress && <p className="mt-2 text-[10px]" style={{ fontFamily: "monospace", color: "#7de8b5" }}>{bulkProgress}</p>}
+                  </div>
 
-                <div className="mt-8">
-                  <h3 className="text-xs font-bold text-stone-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <Info className="w-3 h-3" /> Debug Info (Last 5 events)
-                  </h3>
-                  <div className="bg-stone-900 rounded-xl p-4 font-mono text-[10px] text-emerald-400 space-y-1">
-                    {debugInfo.length === 0 ? (
-                      <div className="text-stone-600 italic">No events logged yet...</div>
-                    ) : (
-                      debugInfo.map((info, i) => <div key={i}>{info}</div>)
-                    )}
+                  <div className="flex justify-end pt-1">
+                    <button onClick={handleIngestCustom} disabled={!customKnowledge.trim() || isIngesting || isBulkImporting} className="chat-admin-action-btn chat-btn-green">
+                      {isIngesting ? <Loader2 size={11} className="animate-spin" /> : <Database size={11} />}
+                      ingest knowledge
+                    </button>
                   </div>
                 </div>
 
-                <div className="mt-8">
-                  <h3 className="text-xs font-bold text-stone-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <Info className="w-3 h-3" /> Recently Saved Knowledge ({savedKnowledge.length})
-                  </h3>
-                  <div className="space-y-2 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
+                {/* Corpus list */}
+                <div className="mt-5">
+                  <p className="chat-admin-label" style={{ marginBottom: "8px" }}>corpus — {savedKnowledge.length} fragments</p>
+                  <div className="space-y-1 max-h-44 overflow-y-auto custom-scrollbar pr-1">
                     {isLoadingKnowledge ? (
-                      <div className="flex items-center justify-center py-8 text-stone-400 text-sm gap-2">
-                        <Loader2 className="w-4 h-4 animate-spin" /> Fetching data...
-                      </div>
+                      <div className="flex items-center gap-2 py-3 text-xs chat-admin-muted"><Loader2 size={11} className="animate-spin" /> loading…</div>
                     ) : savedKnowledge.length === 0 ? (
-                      <div className="text-center py-8 text-stone-400 text-sm border-2 border-dashed border-stone-100 rounded-xl">
-                        No knowledge saved yet. Add some above!
-                      </div>
+                      <p className="text-xs py-3 chat-admin-muted">No corpus entries yet.</p>
                     ) : (
                       savedKnowledge.map((item) => (
-                        <div key={item.id} className="p-3 bg-stone-50 border border-stone-100 rounded-lg text-xs text-stone-600 leading-relaxed hover:border-emerald-200 transition-colors">
-                          <div className="flex flex-wrap items-center gap-2 mb-1">
-                            <span className="font-bold text-emerald-700">#{item.id}</span>
-                            {item.topic?.trim() ? (
-                              <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-semibold text-[10px] uppercase tracking-wide">
-                                {item.topic.trim()}
-                              </span>
-                            ) : null}
-                          </div>
-                          {item.content}
+                        <div key={item.id} className="chat-corpus-row">
+                          <span className="chat-corpus-id">#{item.id}</span>
+                          {item.topic?.trim() ? <span className="chat-corpus-topic">{item.topic}</span> : null}
+                          <span className="chat-corpus-preview">{item.content.slice(0, 90)}…</span>
                         </div>
                       ))
                     )}
                   </div>
                 </div>
               </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Chat Area */}
-      <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="max-w-4xl mx-auto space-y-6">
-          <AnimatePresence initial={false}>
-            {messages.map((msg) => (
-              <motion.div
-                key={msg.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                <div className={`flex gap-3 max-w-[85%] ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 shadow-sm ${
-                    msg.role === "user" ? "bg-emerald-100 text-emerald-700" : "bg-white text-emerald-600 border border-stone-200"
-                  }`}>
-                    {msg.role === "user" ? <User size={18} /> : <Bot size={18} />}
-                  </div>
-                  <div className={`p-4 rounded-2xl shadow-sm ${
-                    msg.role === "user" 
-                      ? "bg-emerald-600 text-white rounded-tr-none" 
-                      : "bg-white border border-stone-200 text-stone-800 rounded-tl-none"
-                  }`}>
-                    <div className="prose prose-stone max-w-none prose-sm md:prose-base dark:prose-invert">
-                      <Markdown>{msg.content}</Markdown>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-          {isLoading && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex justify-start"
-            >
-              <div className="flex gap-3 items-center text-stone-400 italic text-sm ml-11">
-                <Loader2 className="animate-spin w-4 h-4" />
-                Vaidya ji soch rahe hain...
-              </div>
             </motion.div>
           )}
-          <div ref={messagesEndRef} />
-        </div>
-      </main>
+        </AnimatePresence>
 
-      {/* Input Area */}
-      <footer className="p-4 md:p-6 bg-white border-t border-stone-200">
-        <div className="max-w-4xl mx-auto">
-          <form onSubmit={handleSend} className="relative group">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Apni health problem batayein... (e.g. Pet me jalan)"
-              className="w-full bg-stone-50 border border-stone-200 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all shadow-inner"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || isLoading}
-              className="absolute right-2 top-2 bottom-2 bg-emerald-600 text-white p-3 rounded-xl hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:hover:bg-emerald-600 shadow-md"
-            >
-              <Send size={20} />
-            </button>
-          </form>
-          <div className="mt-3 flex gap-4 justify-center text-[10px] md:text-xs text-stone-400 font-medium uppercase tracking-widest">
-            <span className="flex items-center gap-1"><Sparkles className="w-3 h-3" /> AI Powered</span>
-            <span className="flex items-center gap-1"><Leaf className="w-3 h-3" /> Ayurvedic Wisdom</span>
-            <span className="flex items-center gap-1"><Info className="w-3 h-3" /> RAG Pipeline</span>
+        {/* ── CHAT MESSAGES ── */}
+        <main className="chat-messages-area custom-scrollbar">
+          <div className="chat-messages-inner">
+
+            {/* Welcome state illustration — inline SVG yantra */}
+            {messages.length === 1 && messages[0].id === "init" && (
+              <div className="chat-welcome-visual">
+                <svg viewBox="0 0 200 200" fill="none" className="chat-welcome-mandala" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="100" cy="100" r="88" stroke="rgba(0,194,112,0.18)" strokeWidth="0.8"/>
+                  <circle cx="100" cy="100" r="72" stroke="rgba(201,169,110,0.2)" strokeWidth="0.6"/>
+                  <circle cx="100" cy="100" r="55" stroke="rgba(0,194,112,0.15)" strokeWidth="0.6"/>
+                  <polygon points="100,28 166,142 34,142" stroke="rgba(0,194,112,0.22)" strokeWidth="0.8" fill="none"/>
+                  <polygon points="100,172 34,58 166,58" stroke="rgba(201,169,110,0.22)" strokeWidth="0.8" fill="none"/>
+                  <circle cx="100" cy="100" r="14" stroke="rgba(0,194,112,0.3)" strokeWidth="0.8" fill="none"/>
+                  <circle cx="100" cy="100" r="4" fill="rgba(0,194,112,0.35)"/>
+                  {[0,45,90,135,180,225,270,315].map((deg, i) => {
+                    const rad = (deg * Math.PI) / 180;
+                    const x = 100 + 55 * Math.cos(rad);
+                    const y = 100 + 55 * Math.sin(rad);
+                    return <circle key={i} cx={x} cy={y} r="1.5" fill="rgba(201,169,110,0.3)"/>;
+                  })}
+                </svg>
+              </div>
+            )}
+
+            <AnimatePresence initial={false}>
+              {messages.map((msg) => (
+                <motion.div
+                  key={msg.id}
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+                  className={`chat-msg-row ${msg.role === "user" ? "chat-msg-row-user" : "chat-msg-row-bot"}`}
+                >
+                  {msg.role === "bot" ? (
+                    <div className="chat-bot-row">
+                      {/* Bot avatar */}
+                      <div className="chat-avatar-wrap">
+                        <img
+                          src={IMG.avatarVaidya}
+                          alt="Vaidya"
+                          className="chat-avatar-img"
+                          onError={(e) => {
+                            const t = e.target as HTMLImageElement;
+                            t.style.display = "none";
+                            t.parentElement!.innerHTML = `<div class="chat-avatar-fallback"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M8 12s1.5 4 4 4 4-4 4-4"/></svg></div>`;
+                          }}
+                        />
+                      </div>
+                      <div className={`chat-bubble-bot ${msg.isNullState ? "chat-bubble-null" : ""} ${msg.isStreaming ? "streaming-cursor" : ""}`}>
+                        {msg.isNullState ? (
+                          <div className="chat-null-state">
+                            <img src={IMG.nullLeaf} alt="" className="chat-null-icon" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                            <div className="rag-prose"><Markdown>{msg.content}</Markdown></div>
+                          </div>
+                        ) : (
+                          <div className="rag-prose"><Markdown>{msg.content}</Markdown></div>
+                        )}
+                        {msg.similarity !== undefined && !msg.isNullState && (
+                          <div className="chat-relevance-tag">relevance · {Math.round(msg.similarity * 100)}%</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="chat-user-row">
+                      <div className="chat-bubble-user">{msg.content}</div>
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+
+            {isLoading && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="chat-bot-row">
+                <div className="chat-avatar-wrap">
+                  <img src={IMG.avatarVaidya} alt="" className="chat-avatar-img" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                </div>
+                <div className="chat-bubble-bot chat-bubble-thinking">
+                  <span className="chat-thinking-dot" /><span className="chat-thinking-dot" /><span className="chat-thinking-dot" />
+                </div>
+              </motion.div>
+            )}
+
+            <div ref={messagesEndRef} />
           </div>
-        </div>
-      </footer>
+        </main>
 
-      {/* Floating Disclaimer */}
-      <div className="fixed bottom-24 right-6 max-w-xs hidden lg:block">
-        <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl shadow-lg flex gap-3">
-          <AlertCircle className="text-amber-600 shrink-0 w-5 h-5" />
-          <p className="text-[10px] text-amber-800 leading-relaxed">
-            <strong>Disclaimer:</strong> Yeh AI-generated advice hai. Gambhir samasya ke liye kripya doctor se sampark karein.
-          </p>
+        {/* ── INPUT BAR ── */}
+        <div className="chat-input-bar">
+          <form onSubmit={handleSend} className="chat-input-form">
+            <div className="chat-input-wrap">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  e.target.style.height = "auto";
+                  e.target.style.height = Math.min(e.target.scrollHeight, 140) + "px";
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+                }}
+                placeholder="Describe your health query or condition…"
+                rows={1}
+                className="chat-input-textarea"
+              />
+              <div className="chat-input-actions">
+                <button
+                  type="submit"
+                  disabled={!input.trim() || isLoading}
+                  className="chat-send-btn"
+                >
+                  {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Send size={15} />}
+                </button>
+              </div>
+            </div>
+            <p className="chat-input-hint">Shift + Enter for new line · responds in Sanskrit-rooted classical tradition</p>
+          </form>
         </div>
       </div>
     </div>
   );
+
 }
