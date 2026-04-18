@@ -577,36 +577,51 @@ export function createApiApp(): express.Express {
     const latinCount = (query.match(/[A-Za-z]/g) ?? []).length;
     const outputLang: "hindi" | "english" = forcedLang ?? (devanagariCount > latinCount ? "hindi" : "english");
 
-/** Build source attribution summary for the response. */
+/** Build detailed source attribution summary for the response. */
 function buildSourceSummary(
   vectorResults: SearchResult[],
   graphContext: string
 ): string {
-  const summary: string[] = [];
-  summary.push("Source Attribution:");
-  summary.push("");
+  const lines: string[] = [];
+  lines.push("\n");
+  lines.push("═".repeat(70));
+  lines.push("DATA SOURCES & ATTRIBUTION");
+  lines.push("═".repeat(70));
+  lines.push("");
 
-  // Vector sources
+  // Vector RAG sources from Supabase
   if (vectorResults.length > 0) {
-    const topics = vectorResults.map((r) => r.topic).filter((t) => t);
-    const uniqueTopics = [...new Set(topics)];
-    summary.push(`Vector RAG (Supabase):`);
-    uniqueTopics.forEach((topic) => {
-      summary.push(`  - ${topic}`);
+    lines.push("VECTOR SEARCH (Supabase Database):");
+    lines.push("─".repeat(70));
+    vectorResults.forEach((r, idx) => {
+      const similarity = (r.similarity * 100).toFixed(1);
+      const preview = r.content.substring(0, 80).replace(/\n/g, " ");
+      lines.push(`${idx + 1}. Topic: ${r.topic}`);
+      lines.push(`   Relevance: ${similarity}%`);
+      lines.push(`   Preview: ${preview}...`);
+      lines.push("");
     });
   }
 
-  // Graph sources
+  // Graph RAG sources from Neo4j
   if (graphContext.trim()) {
-    summary.push("");
-    summary.push(`Graph RAG (Neo4j):`);
-    const lines = graphContext.split("\n").slice(1); // Skip "Graph facts:" header
-    lines.forEach((line) => {
-      if (line.trim()) summary.push(`  ${line}`);
+    lines.push("");
+    lines.push("KNOWLEDGE GRAPH (Neo4j Database):");
+    lines.push("─".repeat(70));
+    const graphLines = graphContext.split("\n").filter((l) => l.trim());
+    graphLines.forEach((line) => {
+      if (line.toLowerCase().includes("graph facts")) return;
+      lines.push(`• ${line}`);
     });
   }
 
-  return summary.join("\n");
+  lines.push("");
+  lines.push("═".repeat(70));
+  lines.push("Note: This answer combines insights from both Supabase Vector Database");
+  lines.push("and Neo4j Knowledge Graph for comprehensive Ayurvedic recommendations.");
+  lines.push("═".repeat(70));
+
+  return lines.join("\n");
 }
     const fullPrompt = `${systemPrompt}\n\n${contextXml}\n\nUSER QUERY:\n${query.trim()}`;
 
