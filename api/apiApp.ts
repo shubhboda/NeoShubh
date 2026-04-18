@@ -5,7 +5,6 @@ import { GoogleGenAI } from "@google/genai";
 import {
   extractEntitiesFromQuery,
   retrieveGraphContext,
-  mergeHybridContext,
 } from "./hybridGraphRag";
 
 const { Pool } = pg;
@@ -239,11 +238,45 @@ export function buildContextXml(results: SearchResult[]): string {
         `  <fragment index="${i + 1}" similarity="${r.similarity.toFixed(4)}">`,
         `    <topic>${topic}</topic>`,
         `    <body>${body}</body>`,
+        `    <source>Vector RAG - Supabase</source>`,
         `  </fragment>`,
       ].join("\n");
     })
     .join("\n");
   return `<context>\n${fragments}\n</context>`;
+}
+
+/** Build context XML with source attribution (for debugging hybrid RAG). */
+export function buildContextXmlWithSources(
+  vectorFragments: SearchResult[],
+  graphText: string
+): string {
+  const fragments: string[] = [];
+
+  // Add vector search results with source attribution
+  vectorFragments.forEach((r, i) => {
+    const topic = (r.topic || "").trim();
+    const body = (r.content || "").trim().slice(0, 900);
+    fragments.push([
+      `  <fragment index="${i + 1}" source="Vector RAG - Supabase" similarity="${r.similarity.toFixed(4)}">`,
+      `    <topic>${topic}</topic>`,
+      `    <body>${body}</body>`,
+      `  </fragment>`,
+    ].join("\n"));
+  });
+
+  // Add graph context with source attribution
+  if (graphText.trim()) {
+    const lines = graphText.split("\n");
+    fragments.push([
+      `  <fragment index="${vectorFragments.length + 1}" source="Graph RAG - Neo4j">`,
+      `    <topic>Knowledge Graph Facts</topic>`,
+      `    <body>${lines.join("\n")}</body>`,
+      `  </fragment>`,
+    ].join("\n"));
+  }
+
+  return `<context>\n${fragments.join("\n")}\n</context>`;
 }
 
 /** Masterclass System Prompt — Role, Operational Constraints, Cognitive Workflow. */
@@ -532,8 +565,8 @@ export function createApiApp(): express.Express {
       console.warn("Graph context retrieval failed:", err instanceof Error ? err.message : String(err));
     }
 
-    // ── Merge vector + graph contexts ──
-    const contextXml = mergeHybridContext(vectorContext, graphContext);
+    // ── Build context with source attribution (for debugging) ──
+    const contextXml = buildContextXmlWithSources(results, graphContext);
 
     // ── Language Detection — explicit override or auto-detect ──
     const validLangs = ["hindi", "english"] as const;
@@ -555,7 +588,15 @@ export function createApiApp(): express.Express {
         contents: fullPrompt,
       });
 
-      send({ type: "meta", similarity: maxSimilarity, fragments: results.length });
+      send({ 
+        type: "meta", 
+        similarity: maxSimilarity, 
+        fragments: results.length,
+        sources: {
+          vectorRag: "Supabase - Vector Search",
+          graphRag: graphContext.trim() ? "Neo4j - Knowledge Graph" : null
+        }
+      });
 
       for await (const chunk of stream) {
         const text = chunk.text;
