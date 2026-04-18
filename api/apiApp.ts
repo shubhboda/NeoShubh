@@ -577,8 +577,37 @@ export function createApiApp(): express.Express {
     const latinCount = (query.match(/[A-Za-z]/g) ?? []).length;
     const outputLang: "hindi" | "english" = forcedLang ?? (devanagariCount > latinCount ? "hindi" : "english");
 
-    // ── LLM Bridge ──
-    const systemPrompt = buildSystemPrompt(outputLang);
+/** Build source attribution summary for the response. */
+function buildSourceSummary(
+  vectorResults: SearchResult[],
+  graphContext: string
+): string {
+  const summary: string[] = [];
+  summary.push("Source Attribution:");
+  summary.push("");
+
+  // Vector sources
+  if (vectorResults.length > 0) {
+    const topics = vectorResults.map((r) => r.topic).filter((t) => t);
+    const uniqueTopics = [...new Set(topics)];
+    summary.push(`Vector RAG (Supabase):`);
+    uniqueTopics.forEach((topic) => {
+      summary.push(`  - ${topic}`);
+    });
+  }
+
+  // Graph sources
+  if (graphContext.trim()) {
+    summary.push("");
+    summary.push(`Graph RAG (Neo4j):`);
+    const lines = graphContext.split("\n").slice(1); // Skip "Graph facts:" header
+    lines.forEach((line) => {
+      if (line.trim()) summary.push(`  ${line}`);
+    });
+  }
+
+  return summary.join("\n");
+}
     const fullPrompt = `${systemPrompt}\n\n${contextXml}\n\nUSER QUERY:\n${query.trim()}`;
 
     try {
@@ -604,6 +633,10 @@ export function createApiApp(): express.Express {
           send({ type: "text", text });
         }
       }
+
+      // Send source attribution summary after the answer
+      const sourceSummary = buildSourceSummary(results, graphContext);
+      send({ type: "sources", content: sourceSummary });
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
       // Surface 429 rate-limit with retry delay hint
