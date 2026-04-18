@@ -2,6 +2,11 @@ import express from "express";
 import cors from "cors";
 import pg from "pg";
 import { GoogleGenAI } from "@google/genai";
+import {
+  extractEntitiesFromQuery,
+  retrieveGraphContext,
+  mergeHybridContext,
+} from "./hybridGraphRag";
 
 const { Pool } = pg;
 
@@ -515,7 +520,20 @@ export function createApiApp(): express.Express {
     }
 
     // ── Context Injection ──
-    const contextXml = buildContextXml(results);
+    let vectorContext = buildContextXml(results);
+
+    // ── Graph RAG: Extract entities and retrieve graph context ──
+    let graphContext = "";
+    try {
+      const entities = await extractEntitiesFromQuery(query.trim());
+      graphContext = await retrieveGraphContext(entities);
+    } catch (err) {
+      // Graph context is optional; if Neo4j fails, continue with vector context only
+      console.warn("Graph context retrieval failed:", err instanceof Error ? err.message : String(err));
+    }
+
+    // ── Merge vector + graph contexts ──
+    const contextXml = mergeHybridContext(vectorContext, graphContext);
 
     // ── Language Detection — explicit override or auto-detect ──
     const validLangs = ["hindi", "english"] as const;
