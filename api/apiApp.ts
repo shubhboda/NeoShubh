@@ -634,9 +634,15 @@ function buildSourceSummary(
         }
       }
 
-      // Send source attribution summary after the answer
+      // Send source attribution summary as final text (appended to answer)
       const sourceSummary = buildSourceSummary(results, graphContext);
-      send({ type: "sources", content: sourceSummary });
+      if (sourceSummary.trim()) {
+        // Send as text so it appears in the UI
+        send({ type: "text", text: "\n\n" + "─".repeat(60) });
+        send({ type: "text", text: "\n" + sourceSummary });
+        // Also send as separate sources event for frontend to track
+        send({ type: "sources", content: sourceSummary });
+      }
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
       // Surface 429 rate-limit with retry delay hint
