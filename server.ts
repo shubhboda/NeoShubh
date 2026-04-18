@@ -1,4 +1,5 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -33,6 +34,13 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  }).on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`\n❌ Port ${PORT} is already in use.\nRun: netstat -ano | findstr :${PORT}  — then taskkill /PID <pid> /F\n`);
+      process.exit(1);
+    } else {
+      throw err;
+    }
   });
 }
 
