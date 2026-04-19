@@ -17,7 +17,7 @@ export interface ExtractedEntities {
 
 let neo4jDriver: Driver | null = null;
 
-function getNeo4jDatabase(): string {
+export function getNeo4jDatabase(): string {
   return process.env.NEO4J_DATABASE?.trim() || process.env.AURA_INSTANCEID?.trim() || "neo4j";
 }
 

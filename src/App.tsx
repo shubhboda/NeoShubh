@@ -1,5 +1,5 @@
 ﻿import React, { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, Leaf, AlertCircle, Loader2, Database, Upload, ChevronDown, X, ArrowLeft } from "lucide-react";
+import { Send, Sparkles, Leaf, AlertCircle, Loader2, Database, Upload, ChevronDown, X, ArrowLeft, Plus, Link2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 import { GoogleGenAI } from "@google/genai";
@@ -102,6 +102,50 @@ export default function App() {
   const [bulkProgress, setBulkProgress] = useState("");
   const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(DEFAULT_KNOWLEDGE_BASE);
   const [outputLang, setOutputLang] = useState<"auto" | "hindi" | "english">("auto");
+  
+  // Chat History Types and State
+  interface ChatSession {
+    id: string;
+    title: string;
+    timestamp: number;
+    messages: Message[];
+  }
+  const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string>("new");
+
+  // Neo4j Node and Relationship Management
+  const [nodeType, setNodeType] = useState<"Disease" | "Symptom" | "Treatment">("Disease");
+  const [nodeName, setNodeName] = useState("");
+  const [isAddingNode, setIsAddingNode] = useState(false);
+  const [nodeError, setNodeError] = useState("");
+  const [nodeSuccess, setNodeSuccess] = useState("");
+  
+  const [relFromType, setRelFromType] = useState<"Disease" | "Symptom" | "Treatment">("Disease");
+  const [relFromName, setRelFromName] = useState("");
+  const [relToType, setRelToType] = useState<"Symptom" | "Treatment" | "Disease">("Symptom");
+  const [relToName, setRelToName] = useState("");
+  const [relationType, setRelationType] = useState<"HAS_DISEASE" | "HAS_SYMPTOM" | "HAS_TREATMENT">("HAS_DISEASE");
+  const [isAddingRel, setIsAddingRel] = useState(false);
+  const [relError, setRelError] = useState("");
+  const [relSuccess, setRelSuccess] = useState("");
+
+  // Supabase to Neo4j Transfer
+  const [isTransferring, setIsTransferring] = useState(false);
+  const [transferProgress, setTransferProgress] = useState("");
+  const [transferError, setTransferError] = useState("");
+  const [transferSuccess, setTransferSuccess] = useState("");
+
+  // Neo4j CSV Bulk Import
+  const [isNeo4jBulkImporting, setIsNeo4jBulkImporting] = useState(false);
+  const [neo4jBulkProgress, setNeo4jBulkProgress] = useState("");
+  const [neo4jBulkError, setNeo4jBulkError] = useState("");
+  const [neo4jBulkSuccess, setNeo4jBulkSuccess] = useState("");
+  const neo4jBulkFileInputRef = useRef<HTMLInputElement>(null);
+
+  // View Nodes
+  const [neo4jNodes, setNeo4jNodes] = useState<Array<{type: string, name: string}>>([]);
+  const [isLoadingNodes, setIsLoadingNodes] = useState(false);
+  const [nodeViewError, setNodeViewError] = useState("");
 
   // Update welcome message instantly when lang toggle changes
   useEffect(() => {
@@ -137,6 +181,80 @@ export default function App() {
       if (unlocked) setIsAdmin(true);
     }
   }, []);
+
+  // Load chat history from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("ayurveda_chat_history");
+    if (saved) {
+      try {
+        setChatHistory(JSON.parse(saved));
+      } catch (e) {
+        console.error("Failed to load chat history", e);
+      }
+    }
+  }, []);
+
+  // Save chat history to localStorage whenever it changes
+  useEffect(() => {
+    if (chatHistory.length > 0) {
+      localStorage.setItem("ayurveda_chat_history", JSON.stringify(chatHistory));
+    }
+  }, [chatHistory]);
+
+  // Update current chat in history when messages change
+  useEffect(() => {
+    if (currentChatId !== "new" && messages.length > 1) {
+      setChatHistory(prev =>
+        prev.map(chat =>
+          chat.id === currentChatId ? { ...chat, messages: [...messages] } : chat
+        )
+      );
+    }
+  }, [messages, currentChatId]);
+
+  const startNewChat = () => {
+    saveCurrentChatToHistory();
+    setMessages([{ id: "init", role: "bot", content: outputLang === "hindi" ? WELCOME_HI : WELCOME_EN }]);
+    setCurrentChatId("new");
+    setInput("");
+  };
+
+  const saveCurrentChatToHistory = () => {
+    if (messages.length <= 1 || currentChatId === "new") return;
+    const userMessage = messages.find(m => m.role === "user")?.content || "Chat";
+    const title = userMessage.slice(0, 45) + (userMessage.length > 45 ? "…" : "");
+    const chatId = Date.now().toString();
+    const newSession: ChatSession = {
+      id: chatId,
+      title,
+      timestamp: Date.now(),
+      messages: [...messages]
+    };
+    setChatHistory(prev => [newSession, ...prev].slice(0, 50));
+  };
+
+  const loadChatFromHistory = (chatId: string) => {
+    const chat = chatHistory.find(c => c.id === chatId);
+    if (chat) {
+      setMessages(chat.messages);
+      setCurrentChatId(chatId);
+    }
+  };
+
+  const deleteChatFromHistory = (chatId: string) => {
+    setChatHistory(prev => prev.filter(c => c.id !== chatId));
+    if (currentChatId === chatId) {
+      startNewChat();
+    }
+  };
+
+  const clearAllHistory = () => {
+    if (window.confirm("Clear all chat history?")) {
+      setChatHistory([]);
+      localStorage.removeItem("ayurveda_chat_history");
+      startNewChat();
+    }
+  };
 
   const addDebug = (msg: string) => {
     setDebugInfo(prev => [new Date().toLocaleTimeString() + ": " + msg, ...prev].slice(0, 5));
@@ -375,6 +493,264 @@ export default function App() {
     }
   };
 
+  const handleAddNode = async () => {
+    if (!nodeName.trim()) {
+      setNodeError("Node name is required");
+      return;
+    }
+    setIsAddingNode(true);
+    setNodeError("");
+    setNodeSuccess("");
+    try {
+      const response = await fetch(apiUrl("/api/neo4j/add-node"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeType: nodeType,
+          nodeName: nodeName.trim()
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to add node");
+      }
+      setNodeSuccess(`✓ ${nodeType} "${nodeName}" created`);
+      setNodeName("");
+      setTimeout(() => setNodeSuccess(""), 3000);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Failed to add node";
+      setNodeError(msg);
+    } finally {
+      setIsAddingNode(false);
+    }
+  };
+
+  const handleAddRelationship = async () => {
+    if (!relFromName.trim() || !relToName.trim()) {
+      setRelError("Both node names are required");
+      return;
+    }
+    setIsAddingRel(true);
+    setRelError("");
+    setRelSuccess("");
+    try {
+      const response = await fetch(apiUrl("/api/neo4j/add-relationship"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromType: relFromType,
+          fromName: relFromName.trim(),
+          toType: relToType,
+          toName: relToName.trim(),
+          relationType: relationType
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to create relationship");
+      }
+      setRelSuccess(`✓ Relationship created`);
+      setRelFromName("");
+      setRelToName("");
+      setTimeout(() => setRelSuccess(""), 3000);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Failed to create relationship";
+      setRelError(msg);
+    } finally {
+      setIsAddingRel(false);
+    }
+  };
+
+  const handleTransferToNeo4j = async () => {
+    if (savedKnowledge.length === 0) {
+      setTransferError("No knowledge entries to transfer");
+      return;
+    }
+
+    setIsTransferring(true);
+    setTransferError("");
+    setTransferSuccess("");
+    setTransferProgress("Starting transfer...");
+
+    try {
+      const total = savedKnowledge.length;
+      let processed = 0;
+      let created = 0;
+
+      // Process each knowledge entry
+      for (const item of savedKnowledge) {
+        processed++;
+        setTransferProgress(`Processing ${processed}/${total}: ${item.topic || "untitled"}...`);
+
+        // Detect entity type from topic or use Disease as default
+        let entityType: "Disease" | "Symptom" | "Treatment" = "Disease";
+        const topic = (item.topic || item.content).toLowerCase();
+        
+        if (topic.includes("symptom") || topic.includes("लक्षण")) {
+          entityType = "Symptom";
+        } else if (topic.includes("treatment") || topic.includes("चिकित्सा") || topic.includes("उपचार")) {
+          entityType = "Treatment";
+        }
+
+        // Create node in Neo4j
+        const nodeName = (item.topic || `Entry_${item.id}`).trim();
+        const response = await fetch(apiUrl("/api/neo4j/add-node"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nodeType: entityType,
+            nodeName: nodeName
+          })
+        });
+
+        if (response.ok) {
+          created++;
+        } else {
+          const err = await response.json();
+          console.warn(`Failed to create node for ${nodeName}:`, err.error);
+        }
+
+        // Small delay to avoid overwhelming the server
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      setTransferSuccess(`✓ Transferred ${created}/${total} entries to Neo4j`);
+      setTransferProgress("");
+      setTimeout(() => setTransferSuccess(""), 4000);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Transfer failed";
+      setTransferError(msg);
+      setTransferProgress("");
+    } finally {
+      setIsTransferring(false);
+    }
+  };
+
+  const handleNeo4jBulkImport = async (csvText: string, fileName: string) => {
+    setIsNeo4jBulkImporting(true);
+    setNeo4jBulkError("");
+    setNeo4jBulkSuccess("");
+    setNeo4jBulkProgress("Parsing CSV...");
+
+    try {
+      // Parse CSV
+      const lines = csvText.trim().split("\n");
+      if (lines.length < 2) {
+        throw new Error("CSV must have at least 1 data row (plus header)");
+      }
+
+      const headers = lines[0].toLowerCase().split(",").map(h => h.trim());
+      const nodeTypeIdx = headers.indexOf("nodetype");
+      const nodeNameIdx = headers.indexOf("nodename") >= 0 ? headers.indexOf("nodename") : headers.indexOf("topic");
+      const contentIdx = headers.indexOf("content") >= 0 ? headers.indexOf("content") : headers.indexOf("description");
+
+      if (nodeNameIdx < 0) {
+        throw new Error("CSV must have 'nodeName' or 'topic' column");
+      }
+
+      const dataRows = lines.slice(1).filter(line => line.trim());
+      if (dataRows.length === 0) {
+        throw new Error("No data rows found in CSV");
+      }
+
+      let created = 0;
+      const total = dataRows.length;
+
+      for (let i = 0; i < dataRows.length; i++) {
+        const row = dataRows[i].split(",").map(v => v.trim());
+        setNeo4jBulkProgress(`Processing ${i + 1}/${total}...`);
+
+        let nodeType: "Disease" | "Symptom" | "Treatment" = "Disease";
+        if (nodeTypeIdx >= 0 && row[nodeTypeIdx]) {
+          const type = row[nodeTypeIdx].toLowerCase();
+          if (type.includes("symptom")) nodeType = "Symptom";
+          else if (type.includes("treatment")) nodeType = "Treatment";
+          else nodeType = "Disease";
+        } else {
+          // Auto-detect from nodeName
+          const name = row[nodeNameIdx].toLowerCase();
+          if (name.includes("symptom") || name.includes("लक्षण")) nodeType = "Symptom";
+          else if (name.includes("treatment") || name.includes("चिकित्सा") || name.includes("उपचार")) nodeType = "Treatment";
+        }
+
+        const nodeName = row[nodeNameIdx];
+        if (!nodeName) continue;
+
+        const response = await fetch(apiUrl("/api/neo4j/add-node"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nodeType,
+            nodeName
+          })
+        });
+
+        if (response.ok) {
+          created++;
+        } else {
+          const err = await response.json();
+          console.warn(`Failed to create node for ${nodeName}:`, err.error);
+        }
+
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      setNeo4jBulkSuccess(`✓ Created ${created}/${total} nodes from CSV`);
+      setNeo4jBulkProgress("");
+      setTimeout(() => setNeo4jBulkSuccess(""), 4000);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "CSV import failed";
+      setNeo4jBulkError(msg);
+      setNeo4jBulkProgress("");
+    } finally {
+      setIsNeo4jBulkImporting(false);
+    }
+  };
+
+  const fetchAllNodes = async () => {
+    setIsLoadingNodes(true);
+    setNodeViewError("");
+    try {
+      const response = await fetch(apiUrl("/api/neo4j/nodes"), {
+        method: "GET",
+        headers: { "Content-Type": "application/json" }
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to fetch nodes");
+      }
+      // Transform the response to match our node format
+      const transformedNodes = data.nodes.map((n: any) => ({
+        type: n.types && n.types.length > 0 ? n.types[0] : "Unknown",
+        name: n.name
+      }));
+      setNeo4jNodes(transformedNodes);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Failed to fetch nodes";
+      setNodeViewError(msg);
+    } finally {
+      setIsLoadingNodes(false);
+    }
+  };
+
+  const deleteNodeFromGraph = async (nodeType: string, nodeName: string) => {
+    if (!window.confirm(`Delete ${nodeType} "${nodeName}"?`)) return;
+    try {
+      const response = await fetch(apiUrl("/api/neo4j/delete-node"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeType, nodeName })
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || "Failed to delete node");
+      }
+      await fetchAllNodes();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Delete failed");
+    }
+  };
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -382,6 +758,21 @@ export default function App() {
     const currentInput = input.trim();
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: currentInput };
     setMessages((prev) => [...prev, userMsg]);
+    
+    // Auto-save to history on first message
+    if (currentChatId === "new" && messages.length === 1) {
+      const chatId = Date.now().toString();
+      const title = currentInput.slice(0, 45) + (currentInput.length > 45 ? "…" : "");
+      const newSession: ChatSession = {
+        id: chatId,
+        title,
+        timestamp: Date.now(),
+        messages: [...messages, userMsg]
+      };
+      setChatHistory(prev => [newSession, ...prev].slice(0, 50));
+      setCurrentChatId(chatId);
+    }
+    
     setInput("");
     setIsLoading(true);
 
@@ -692,7 +1083,91 @@ The corpus doesn't have a strong enough match for this query. Try rephrasing, or
 
           <div style={{ flex: 1 }} />
 
-          {/* Footer */}
+          {/* Chat History */}
+          {chatHistory.length > 0 && (
+            <div style={{ borderTop: "1px solid rgba(240,232,213,0.1)", paddingTop: "1rem", marginTop: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", padding: "0 0.25rem" }}>
+                <span style={{ fontSize: "0.68rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "rgba(240,232,213,0.6)", fontWeight: 700 }}>Recent</span>
+                <button onClick={clearAllHistory} style={{ background: "none", border: "none", color: "rgba(240,232,213,0.4)", cursor: "pointer", fontSize: "0.7rem", fontWeight: 600 }}>
+                  Clear
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", maxHeight: "150px", overflowY: "auto" }}>
+                {chatHistory.slice(0, 10).map((chat) => (
+                  <div
+                    key={chat.id}
+                    onClick={() => loadChatFromHistory(chat.id)}
+                    style={{
+                      padding: "0.6rem 0.7rem",
+                      backgroundColor: currentChatId === chat.id ? "rgba(0,194,112,0.12)" : "transparent",
+                      borderLeft: currentChatId === chat.id ? "2px solid rgba(0,194,112,0.4)" : "none",
+                      borderRadius: "7px",
+                      cursor: "pointer",
+                      fontSize: "0.72rem",
+                      color: "rgba(240,232,213,0.7)",
+                      transition: "all 0.2s",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center"
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>{chat.title}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteChatFromHistory(chat.id);
+                      }}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "rgba(220,80,60,0.5)",
+                        cursor: "pointer",
+                        marginLeft: "0.3rem",
+                        fontSize: "0.8rem",
+                        padding: "0"
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* New Chat Button */}
+          <button
+            onClick={startNewChat}
+            style={{
+              width: "100%",
+              padding: "0.7rem 1rem",
+              backgroundColor: "rgba(0,194,112,0.18)",
+              border: "1px solid rgba(0,194,112,0.3)",
+              borderRadius: "9px",
+              color: "rgba(240,232,213,0.85)",
+              fontSize: "0.73rem",
+              fontWeight: 700,
+              cursor: "pointer",
+              transition: "all 0.2s",
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              marginBottom: "1rem",
+              marginTop: chatHistory.length > 0 ? "0" : "1rem"
+            }}
+            onMouseEnter={(e) => {
+              (e.target as HTMLButtonElement).style.backgroundColor = "rgba(0,194,112,0.25)";
+              (e.target as HTMLButtonElement).style.borderColor = "rgba(0,194,112,0.45)";
+            }}
+            onMouseLeave={(e) => {
+              (e.target as HTMLButtonElement).style.backgroundColor = "rgba(0,194,112,0.18)";
+              (e.target as HTMLButtonElement).style.borderColor = "rgba(0,194,112,0.3)";
+            }}
+          >
+            + New Chat
+          </button>
           <div className="chat-sidebar-footer">
             <div className="chat-sidebar-footer-text">Threshold · 0.55 · FTS fusion</div>
           </div>
@@ -832,6 +1307,232 @@ The corpus doesn't have a strong enough match for this query. Try rephrasing, or
                         </div>
                       ))
                     )}
+                  </div>
+                </div>
+
+                {/* ── LINK NODES (Neo4j) ── */}
+                <div className="mt-6 pt-5" style={{ borderTop: "1px solid rgba(240,232,213,0.1)" }}>
+                  <p className="chat-admin-label" style={{ marginBottom: "12px" }}>Link Nodes — Graph Database</p>
+                  
+                  {/* Add Node Section */}
+                  <div className="space-y-3 mb-5">
+                    <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.6)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Add Node</p>
+                    <div className="flex gap-2">
+                      <select value={nodeType} onChange={(e) => setNodeType(e.target.value as any)} className="chat-admin-input" style={{ flex: 0.6 }}>
+                        <option>Disease</option>
+                        <option>Symptom</option>
+                        <option>Treatment</option>
+                      </select>
+                      <input
+                        type="text"
+                        value={nodeName}
+                        onChange={(e) => setNodeName(e.target.value)}
+                        placeholder="Node name"
+                        className="chat-admin-input"
+                        style={{ flex: 1 }}
+                      />
+                    </div>
+                    {nodeError && <p style={{ fontSize: "0.7rem", color: "#dc4d4d" }}>✗ {nodeError}</p>}
+                    {nodeSuccess && <p style={{ fontSize: "0.7rem", color: "#00c270" }}>{nodeSuccess}</p>}
+                    <button
+                      onClick={handleAddNode}
+                      disabled={isAddingNode || !nodeName.trim()}
+                      className="chat-admin-action-btn chat-btn-green"
+                      style={{ width: "100%" }}
+                    >
+                      {isAddingNode ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+                      Add Node
+                    </button>
+                  </div>
+
+                  {/* Add Relationship Section */}
+                  <div className="space-y-3">
+                    <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.6)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Link Nodes</p>
+                    
+                    <div className="flex gap-2">
+                      <select value={relFromType} onChange={(e) => setRelFromType(e.target.value as any)} className="chat-admin-input" style={{ flex: 0.4 }}>
+                        <option>Disease</option>
+                        <option>Symptom</option>
+                        <option>Treatment</option>
+                      </select>
+                      <input
+                        type="text"
+                        value={relFromName}
+                        onChange={(e) => setRelFromName(e.target.value)}
+                        placeholder="Source"
+                        className="chat-admin-input"
+                        style={{ flex: 0.6 }}
+                      />
+                    </div>
+
+                    <div className="flex gap-2">
+                      <select value={relationType} onChange={(e) => setRelationType(e.target.value as any)} className="chat-admin-input" style={{ flex: 0.4 }}>
+                        <option>HAS_DISEASE</option>
+                        <option>HAS_SYMPTOM</option>
+                        <option>HAS_TREATMENT</option>
+                      </select>
+                      <span style={{ flex: 0.6, display: "flex", alignItems: "center", fontSize: "0.7rem", color: "rgba(240,232,213,0.5)" }}>→</span>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <select value={relToType} onChange={(e) => setRelToType(e.target.value as any)} className="chat-admin-input" style={{ flex: 0.4 }}>
+                        <option>Symptom</option>
+                        <option>Treatment</option>
+                        <option>Disease</option>
+                      </select>
+                      <input
+                        type="text"
+                        value={relToName}
+                        onChange={(e) => setRelToName(e.target.value)}
+                        placeholder="Target"
+                        className="chat-admin-input"
+                        style={{ flex: 0.6 }}
+                      />
+                    </div>
+
+                    {relError && <p style={{ fontSize: "0.7rem", color: "#dc4d4d" }}>✗ {relError}</p>}
+                    {relSuccess && <p style={{ fontSize: "0.7rem", color: "#00c270" }}>{relSuccess}</p>}
+                    <button
+                      onClick={handleAddRelationship}
+                      disabled={isAddingRel || !relFromName.trim() || !relToName.trim()}
+                      className="chat-admin-action-btn chat-btn-gold"
+                      style={{ width: "100%" }}
+                    >
+                      {isAddingRel ? <Loader2 size={11} className="animate-spin" /> : <Link2 size={11} />}
+                      Create Link
+                    </button>
+                  </div>
+
+                  {/* Neo4j Bulk CSV */}
+                  <div className="space-y-3 mt-5 pt-5" style={{ borderTop: "1px solid rgba(240,232,213,0.08)" }}>
+                    <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.6)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Bulk CSV Upload</p>
+                    <p style={{ fontSize: "0.65rem", color: "rgba(240,232,213,0.5)", lineHeight: "1.4" }}>
+                      CSV requires <code style={{ backgroundColor: "rgba(0,0,0,0.3)", padding: "2px 4px", borderRadius: "3px" }}>nodeName</code> (or <code style={{ backgroundColor: "rgba(0,0,0,0.3)", padding: "2px 4px", borderRadius: "3px" }}>topic</code>) column. Optionally include <code style={{ backgroundColor: "rgba(0,0,0,0.3)", padding: "2px 4px", borderRadius: "3px" }}>nodeType</code> column.
+                    </p>
+                    <input 
+                      ref={neo4jBulkFileInputRef} 
+                      type="file" 
+                      accept=".csv,text/csv" 
+                      style={{ display: "none" }}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        const el = e.target;
+                        if (!file) return;
+                        const text = await file.text();
+                        el.value = "";
+                        await handleNeo4jBulkImport(text, file.name);
+                      }}
+                    />
+                    <div className="flex gap-2">
+                      <button 
+                        type="button" 
+                        disabled={isNeo4jBulkImporting} 
+                        onClick={() => neo4jBulkFileInputRef.current?.click()} 
+                        className="chat-admin-action-btn chat-btn-green"
+                        style={{ flex: 1 }}
+                      >
+                        {isNeo4jBulkImporting ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                        Choose CSV
+                      </button>
+                    </div>
+                    {neo4jBulkProgress && <p style={{ fontSize: "0.7rem", color: "rgba(0,194,112,0.7)", fontFamily: "monospace" }}>⟳ {neo4jBulkProgress}</p>}
+                    {neo4jBulkError && <p style={{ fontSize: "0.7rem", color: "#dc4d4d" }}>✗ {neo4jBulkError}</p>}
+                    {neo4jBulkSuccess && <p style={{ fontSize: "0.7rem", color: "#00c270" }}>{neo4jBulkSuccess}</p>}
+                  </div>
+
+                  {/* Transfer Supabase to Neo4j */}
+                  <div className="space-y-3 mt-5 pt-5" style={{ borderTop: "1px solid rgba(240,232,213,0.08)" }}>
+                    <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.6)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Transfer to Graph</p>
+                    <p style={{ fontSize: "0.65rem", color: "rgba(240,232,213,0.5)", lineHeight: "1.4" }}>
+                      Migrate all corpus entries from Supabase to Neo4j as nodes. Topics with "symptom", "treatment", etc. will be auto-typed.
+                    </p>
+                    {transferProgress && <p style={{ fontSize: "0.7rem", color: "rgba(0,194,112,0.7)", fontFamily: "monospace" }}>⟳ {transferProgress}</p>}
+                    {transferError && <p style={{ fontSize: "0.7rem", color: "#dc4d4d" }}>✗ {transferError}</p>}
+                    {transferSuccess && <p style={{ fontSize: "0.7rem", color: "#00c270" }}>{transferSuccess}</p>}
+                    <button
+                      onClick={handleTransferToNeo4j}
+                      disabled={isTransferring || savedKnowledge.length === 0}
+                      className="chat-admin-action-btn chat-btn-green"
+                      style={{ width: "100%" }}
+                    >
+                      {isTransferring ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                      Transfer {savedKnowledge.length} Entries
+                    </button>
+                  </div>
+
+                  {/* View All Nodes */}
+                  <div className="space-y-3 mt-5 pt-5" style={{ borderTop: "1px solid rgba(240,232,213,0.08)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.6)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Graph Nodes ({neo4jNodes.length})</p>
+                      <button
+                        onClick={fetchAllNodes}
+                        disabled={isLoadingNodes}
+                        style={{
+                          fontSize: "0.65rem",
+                          color: "rgba(0,194,112,0.7)",
+                          background: "none",
+                          border: "1px solid rgba(0,194,112,0.3)",
+                          borderRadius: "4px",
+                          padding: "4px 8px",
+                          cursor: "pointer",
+                          transition: "all 0.2s"
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.target as HTMLButtonElement).style.borderColor = "rgba(0,194,112,0.6)";
+                          (e.target as HTMLButtonElement).style.color = "rgba(0,194,112,1)";
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.target as HTMLButtonElement).style.borderColor = "rgba(0,194,112,0.3)";
+                          (e.target as HTMLButtonElement).style.color = "rgba(0,194,112,0.7)";
+                        }}
+                      >
+                        {isLoadingNodes ? "Loading..." : "Refresh"}
+                      </button>
+                    </div>
+                    {nodeViewError && <p style={{ fontSize: "0.7rem", color: "#dc4d4d" }}>✗ {nodeViewError}</p>}
+                    <div style={{ maxHeight: "200px", overflowY: "auto", borderRadius: "8px", border: "1px solid rgba(240,232,213,0.1)", padding: "0.75rem" }}>
+                      {neo4jNodes.length === 0 ? (
+                        <p style={{ fontSize: "0.7rem", color: "rgba(240,232,213,0.4)" }}>No nodes yet. Create some to see them here.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                          {neo4jNodes.map((node, idx) => (
+                            <div
+                              key={idx}
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                padding: "0.6rem",
+                                backgroundColor: "rgba(0,194,112,0.08)",
+                                borderLeft: `2px solid rgba(0,194,112,0.3)`,
+                                borderRadius: "4px"
+                              }}
+                            >
+                              <div style={{ flex: 1 }}>
+                                <span style={{ fontSize: "0.65rem", color: "rgba(0,194,112,0.6)", fontWeight: 600 }}>{node.type}</span>
+                                <span style={{ fontSize: "0.75rem", color: "rgba(240,232,213,0.8)", marginLeft: "0.5rem", fontWeight: 500 }}>{node.name}</span>
+                              </div>
+                              <button
+                                onClick={() => deleteNodeFromGraph(node.type, node.name)}
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  color: "rgba(220,80,60,0.5)",
+                                  cursor: "pointer",
+                                  fontSize: "0.8rem",
+                                  padding: "0 4px",
+                                  transition: "color 0.2s"
+                                }}
+                                onMouseEnter={(e) => (e.currentTarget.style.color = "rgba(220,80,60,0.8)")}
+                                onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(220,80,60,0.5)")}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

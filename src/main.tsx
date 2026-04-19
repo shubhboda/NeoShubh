@@ -28,3 +28,4 @@ createRoot(document.getElementById('root')!).render(
     <Root />
   </StrictMode>,
 );
+

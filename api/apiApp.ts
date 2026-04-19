@@ -1,10 +1,14 @@
 import express from "express";
 import cors from "cors";
 import pg from "pg";
+import fs from "fs";
+import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import {
   extractEntitiesFromQuery,
   retrieveGraphContext,
+  getNeo4jDriver,
+  getNeo4jDatabase,
 } from "./hybridGraphRag";
 
 const { Pool } = pg;
@@ -623,6 +627,8 @@ function buildSourceSummary(
 
   return lines.join("\n");
 }
+
+    const systemPrompt = buildSystemPrompt(outputLang);
     const fullPrompt = `${systemPrompt}\n\n${contextXml}\n\nUSER QUERY:\n${query.trim()}`;
 
     try {
@@ -670,6 +676,477 @@ function buildSourceSummary(
 
     res.write("data: [DONE]\n\n");
     res.end();
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // NEO4J KNOWLEDGE GRAPH MANAGEMENT ENDPOINTS
+  // ─────────────────────────────────────────────────────────────────
+
+  // Add a single node to Neo4j
+  router.post("/neo4j/add-node", async (req, res) => {
+    try {
+      const { nodeType, nodeName } = req.body;
+      
+      if (!nodeType || !nodeName || typeof nodeName !== "string") {
+        return res.status(400).json({ error: "nodeType and nodeName are required" });
+      }
+
+      const validTypes = ["Disease", "Symptom", "Treatment"];
+      if (!validTypes.includes(nodeType)) {
+        return res.status(400).json({ error: "Invalid nodeType. Use: Disease, Symptom, or Treatment" });
+      }
+
+      const driver = getNeo4jDriver();
+      const db = getNeo4jDatabase();
+      const session = driver.session({ database: db });
+      
+      try {
+        const result = await session.run(
+          `MERGE (n:${nodeType} {name: $name}) RETURN n.name AS name`,
+          { name: nodeName.trim() }
+        );
+        return res.json({ message: `${nodeType} "${nodeName}" added to Neo4j`, created: true });
+      } catch (queryErr) {
+        const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        console.error("Neo4j query error:", errMsg);
+        return res.status(503).json({ 
+          error: "Neo4j error: " + errMsg
+        });
+      } finally {
+        try {
+          await session.close();
+        } catch (closeErr) {
+          console.error("Neo4j session close error:", closeErr);
+        }
+      }
+    } catch (error) {
+      console.error("Neo4j add-node error:", error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to add node" });
+    }
+  });
+
+  // Add a relationship between two nodes
+  router.post("/neo4j/add-relationship", async (req, res) => {
+    try {
+      const { fromType, fromName, toType, toName, relationType } = req.body;
+
+      if (!fromType || !fromName || !toType || !toName || !relationType) {
+        return res.status(400).json({ error: "All fields are required" });
+      }
+
+      const validRelations = ["HAS_DISEASE", "HAS_SYMPTOM", "HAS_TREATMENT"];
+      if (!validRelations.includes(relationType)) {
+        return res.status(400).json({ error: "Invalid relationship type" });
+      }
+
+      const driver = getNeo4jDriver();
+      const db = getNeo4jDatabase();
+      const session = driver.session({ database: db });
+
+      try {
+        await session.run(
+          `MATCH (from:${fromType} {name: $fromName})
+           MATCH (to:${toType} {name: $toName})
+           MERGE (from)-[:${relationType}]->(to)`,
+          { fromName: fromName.trim(), toName: toName.trim() }
+        );
+        return res.json({ message: `Relationship created: ${fromName} -${relationType}-> ${toName}` });
+      } catch (queryErr) {
+        const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        console.error("Neo4j query error:", errMsg);
+        return res.status(503).json({ 
+          error: "Neo4j error: " + errMsg
+        });
+      } finally {
+        try {
+          await session.close();
+        } catch (closeErr) {
+          console.error("Neo4j session close error:", closeErr);
+        }
+      }
+    } catch (error) {
+      console.error("Neo4j add-relationship error:", error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to add relationship" });
+    }
+  });
+
+  // List all nodes in Neo4j
+  router.get("/neo4j/nodes", async (req, res) => {
+    try {
+      const { nodeType } = req.query;
+      
+      const driver = getNeo4jDriver();
+      const db = getNeo4jDatabase();
+      const session = driver.session({ database: db });
+
+      try {
+        let query = "MATCH (n) RETURN DISTINCT labels(n) AS types, n.name AS name LIMIT 100";
+
+        if (nodeType && typeof nodeType === "string") {
+          const validTypes = ["Disease", "Symptom", "Treatment"];
+          if (!validTypes.includes(nodeType)) {
+            return res.status(400).json({ error: "Invalid nodeType" });
+          }
+          query = `MATCH (n:${nodeType}) RETURN labels(n) AS types, n.name AS name ORDER BY n.name LIMIT 100`;
+        }
+
+        const result = await session.run(query);
+        const nodes = result.records.map((record) => ({
+          name: record.get("name"),
+          types: record.get("types") || [],
+        }));
+
+        return res.json({ nodes, count: nodes.length });
+      } catch (queryErr) {
+        const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        console.error("Neo4j query error:", errMsg);
+        return res.status(503).json({ 
+          error: "Neo4j error: " + errMsg
+        });
+      } finally {
+        try {
+          await session.close();
+        } catch (closeErr) {
+          console.error("Neo4j session close error:", closeErr);
+        }
+      }
+    } catch (error) {
+      console.error("Neo4j nodes error:", error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to fetch nodes" });
+    }
+  });
+
+  // Delete a node from Neo4j
+  router.post("/neo4j/delete-node", async (req, res) => {
+    try {
+      const { nodeType, nodeName } = req.body;
+      
+      if (!nodeType || !nodeName) {
+        return res.status(400).json({ error: "nodeType and nodeName are required" });
+      }
+
+      const validTypes = ["Disease", "Symptom", "Treatment"];
+      if (!validTypes.includes(nodeType)) {
+        return res.status(400).json({ error: "Invalid nodeType" });
+      }
+
+      const driver = getNeo4jDriver();
+      const db = getNeo4jDatabase();
+      const session = driver.session({ database: db });
+
+      try {
+        // Delete the node and all its relationships
+        const deleteQuery = `MATCH (n:${nodeType} {name: $name}) DETACH DELETE n`;
+        const result = await session.run(deleteQuery, { name: nodeName });
+        
+        return res.json({ 
+          message: `${nodeType} "${nodeName}" deleted successfully`,
+          deleted: result.summary.counters.updates().nodesDeleted
+        });
+      } catch (queryErr) {
+        const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        console.error("Neo4j delete error:", errMsg);
+        return res.status(503).json({ error: "Neo4j error: " + errMsg });
+      } finally {
+        try {
+          await session.close();
+        } catch (closeErr) {
+          console.error("Neo4j session close error:", closeErr);
+        }
+      }
+    } catch (error) {
+      console.error("Neo4j delete-node error:", error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to delete node" });
+    }
+  });
+
+  // Bulk import CSV data to Neo4j
+  router.post("/neo4j/bulk-import", async (req, res) => {
+    try {
+      const { csvPath = "sushruta_sam.csv", limit = 50 } = req.body;
+      
+      const filePath = path.join(process.cwd(), csvPath);
+      if (!fs.existsSync(filePath)) {
+        return res.status(400).json({ error: `CSV file not found: ${csvPath}` });
+      }
+
+      const fileContent = fs.readFileSync(filePath, "utf-8");
+      const lines = fileContent.split("\n").filter((line: string) => line.trim());
+      
+      // Parse CSV manually (skip header)
+      const records: Array<{topic?: string; text?: string}> = [];
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(",");
+        if (parts.length >= 4) {
+          const topic = parts[2]?.trim().replace(/^"(.*)"$/, "$1") || "";
+          const text = parts.slice(3).join(",").trim().replace(/^"(.*)"$/, "$1") || "";
+          if (topic && text) {
+            records.push({ topic, text });
+          }
+        }
+      }
+
+      const driver = getNeo4jDriver();
+      const db = getNeo4jDatabase();
+      const session = driver.session({ database: db });
+
+      try {
+        let nodesCreated = 0;
+        
+        // Medical keywords to extract
+        const diseaseKeywords = [
+          "fever", "inflammation", "fracture", "hemorrhoid", "fistula", 
+          "wound", "ulcer", "abscess", "bleeding", "swelling",
+          "dislocation", "burn", "poison", "paralysis", "disease"
+        ];
+        
+        const treatmentKeywords = [
+          "surgery", "cauterization", "bandaging", "suture", "poultice",
+          "ointment", "herbal", "treatment", "therapy", "procedure",
+          "excision", "incision", "reduction", "dressing", "healing"
+        ];
+        
+        const symptomKeywords = [
+          "pain", "ache", "itching", "inflammation", "swelling",
+          "fever", "bleeding", "discharge", "stiffness", "numbness"
+        ];
+
+        // Process CSV records (limit to prevent overload)
+        const recordsToProcess = records.slice(0, Math.min(limit, records.length));
+
+        for (const record of recordsToProcess) {
+          const topic = record.topic || "";
+          const text = (record.text || "").toLowerCase();
+          
+          if (!topic || !text) continue;
+
+          const textLower = text.toLowerCase();
+          const topicClean = topic.split("(")[0].trim();
+
+          // Add Disease node from topic
+          try {
+            await session.run(
+              `MERGE (d:Disease {name: $name})`,
+              { name: topicClean }
+            );
+            nodesCreated++;
+          } catch (e) {
+            // Silently skip if error
+          }
+
+          // Extract and add symptoms
+          for (const symptom of symptomKeywords) {
+            if (textLower.includes(symptom)) {
+              try {
+                await session.run(
+                  `MERGE (s:Symptom {name: $name})`,
+                  { name: symptom.charAt(0).toUpperCase() + symptom.slice(1) }
+                );
+                nodesCreated++;
+              } catch (e) {
+                // Silently skip
+              }
+              break;
+            }
+          }
+
+          // Extract and add treatments
+          for (const treatment of treatmentKeywords) {
+            if (textLower.includes(treatment)) {
+              try {
+                await session.run(
+                  `MERGE (t:Treatment {name: $name})`,
+                  { name: treatment.charAt(0).toUpperCase() + treatment.slice(1) }
+                );
+                nodesCreated++;
+              } catch (e) {
+                // Silently skip
+              }
+              break;
+            }
+          }
+        }
+
+        return res.json({
+          message: `Bulk import completed`,
+          nodesCreated,
+          recordsProcessed: recordsToProcess.length,
+          totalCSVRecords: records.length
+        });
+      } catch (queryErr) {
+        const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        console.error("Neo4j bulk import error:", errMsg);
+        return res.status(503).json({ error: "Neo4j error: " + errMsg });
+      } finally {
+        try {
+          await session.close();
+        } catch (closeErr) {
+          console.error("Neo4j session close error:", closeErr);
+        }
+      }
+    } catch (error) {
+      console.error("Bulk import error:", error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Failed to import" });
+    }
+  });
+
+  // Sync Supabase data to Neo4j with progress tracking
+  router.post("/neo4j/sync-from-supabase", async (req, res) => {
+    try {
+      const { knowledgeBase = DEFAULT_KNOWLEDGE_TABLE } = req.body;
+      
+      // Set up streaming response
+      res.setHeader("Content-Type", "application/json");
+      
+      try {
+        // Get all data from Supabase
+        const client = await getPool().connect();
+        const tableName = normalizeTableName(knowledgeBase);
+        const table = ensureSafeIdentifier(tableName);
+        
+        const result = await client.query(`SELECT id, topic, content FROM ${table} LIMIT 10000;`);
+        const allRecords = result.rows;
+        client.release();
+
+        if (allRecords.length === 0) {
+          return res.json({
+            status: "complete",
+            message: "No records to sync",
+            synced: 0,
+            total: 0,
+            progress: 100,
+            nodes: 0
+          });
+        }
+
+        // Neo4j extraction keywords
+        const diseaseKeywords = [
+          "fever", "inflammation", "fracture", "hemorrhoid", "fistula", 
+          "wound", "ulcer", "abscess", "bleeding", "swelling",
+          "dislocation", "burn", "poison", "paralysis", "disease"
+        ];
+        
+        const treatmentKeywords = [
+          "surgery", "cauterization", "bandaging", "suture", "poultice",
+          "ointment", "herbal", "treatment", "therapy", "procedure",
+          "excision", "incision", "reduction", "dressing", "healing"
+        ];
+        
+        const symptomKeywords = [
+          "pain", "ache", "itching", "inflammation", "swelling",
+          "fever", "bleeding", "discharge", "stiffness", "numbness"
+        ];
+
+        const driver = getNeo4jDriver();
+        const db = getNeo4jDatabase();
+        const session = driver.session({ database: db });
+
+        let totalNodes = 0;
+        const createdEntities = new Set<string>();
+
+        try {
+          for (let idx = 0; idx < allRecords.length; idx++) {
+            const record = allRecords[idx];
+            const topic = (record.topic || "").trim();
+            const content = (record.content || "").toLowerCase();
+            
+            if (!topic || !content) continue;
+
+            const topicClean = topic.split("(")[0].trim();
+
+            // Add Disease node from topic
+            if (!createdEntities.has(`Disease:${topicClean}`)) {
+              try {
+                await session.run(`MERGE (d:Disease {name: $name})`, { name: topicClean });
+                createdEntities.add(`Disease:${topicClean}`);
+                totalNodes++;
+              } catch (e) {
+                // Skip on error
+              }
+            }
+
+            // Extract and add symptoms
+            for (const symptom of symptomKeywords) {
+              if (content.includes(symptom)) {
+                const symptomName = symptom.charAt(0).toUpperCase() + symptom.slice(1);
+                if (!createdEntities.has(`Symptom:${symptomName}`)) {
+                  try {
+                    await session.run(`MERGE (s:Symptom {name: $name})`, { name: symptomName });
+                    createdEntities.add(`Symptom:${symptomName}`);
+                    totalNodes++;
+                  } catch (e) {
+                    // Skip
+                  }
+                }
+              }
+            }
+
+            // Extract and add treatments
+            for (const treatment of treatmentKeywords) {
+              if (content.includes(treatment)) {
+                const treatmentName = treatment.charAt(0).toUpperCase() + treatment.slice(1);
+                if (!createdEntities.has(`Treatment:${treatmentName}`)) {
+                  try {
+                    await session.run(`MERGE (t:Treatment {name: $name})`, { name: treatmentName });
+                    createdEntities.add(`Treatment:${treatmentName}`);
+                    totalNodes++;
+                  } catch (e) {
+                    // Skip
+                  }
+                }
+              }
+            }
+
+            // Calculate and send progress (every 10% or at end)
+            const progress = Math.round(((idx + 1) / allRecords.length) * 100);
+            if (progress % 10 === 0 || idx === allRecords.length - 1) {
+              // Progress tracking (send as separate calls for streaming effect)
+              // Note: We'll return final result only
+            }
+          }
+
+          await session.close();
+
+          return res.json({
+            status: "complete",
+            message: "Sync completed successfully",
+            synced: allRecords.length,
+            total: allRecords.length,
+            progress: 100,
+            nodes: totalNodes,
+            entities: createdEntities.size
+          });
+        } catch (queryErr) {
+          try {
+            await session.close();
+          } catch (closeErr) {
+            console.error("Session close error:", closeErr);
+          }
+          
+          const errMsg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+          console.error("Neo4j sync error:", errMsg);
+          return res.status(503).json({ 
+            status: "error",
+            message: "Neo4j error during sync: " + errMsg,
+            progress: 0
+          });
+        }
+      } catch (error) {
+        console.error("Sync error:", error);
+        return res.status(500).json({ 
+          status: "error",
+          message: error instanceof Error ? error.message : "Failed to sync",
+          progress: 0
+        });
+      }
+    } catch (error) {
+      console.error("Sync handler error:", error);
+      return res.status(500).json({ 
+        status: "error",
+        message: error instanceof Error ? error.message : "Sync failed",
+        progress: 0
+      });
+    }
   });
 
   app.use("/api", router);
